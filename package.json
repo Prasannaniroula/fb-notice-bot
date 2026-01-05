@@ -7,8 +7,7 @@
       "start": "node automation.js"
     },
     "dependencies": {
-      "chrome-aws-lambda": "^10.0.1",
-      "puppeteer-core": "^19.11.1",
+      "puppeteer": "^19.11.1",
       "node-fetch": "^2.6.7",
       "form-data": "^4.0.0"
     }
