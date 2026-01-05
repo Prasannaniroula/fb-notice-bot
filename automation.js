@@ -61,7 +61,11 @@ async function postToFB(message, imagePath = null) {
 
 // Scrape notices from a page
 async function scrapeNotices(url) {
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({
+        headless: "new", // opt-in to new headless mode
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
 
@@ -84,7 +88,11 @@ async function scrapeNotices(url) {
 
 // Capture screenshot of notice
 async function captureScreenshot(url, filename) {
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({
+        headless: "new", // opt-in to new headless mode
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
     const filepath = path.join('/tmp', filename);
