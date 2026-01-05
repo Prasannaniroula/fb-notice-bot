@@ -1,0 +1,16 @@
+{
+    "name": "fb-notice-bot",
+    "version": "1.0.0",
+    "description": "Automation for scraping TU + IOE notices and posting to Facebook",
+    "main": "automation.js",
+    "scripts": {
+      "start": "node automation.js"
+    },
+    "dependencies": {
+      "chrome-aws-lambda": "^20.0.0",
+      "puppeteer-core": "^20.0.0",
+      "node-fetch": "^3.3.2",
+      "form-data": "^4.0.0"
+    }
+  }
+  

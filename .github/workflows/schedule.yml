@@ -1,0 +1,33 @@
+name: FB Notice Bot
+
+on:
+  schedule:
+    # Runs 4 times/day (UTC)
+    - cron: '0 0,6,12,18 * * *'  # adjust to UTC; 0 = midnight UTC
+  workflow_dispatch:  # allows manual trigger
+
+jobs:
+  run-notice-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2️⃣ Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      # 3️⃣ Install dependencies
+      - name: Install dependencies
+        run: npm install
+
+      # 4️⃣ Run the automation script
+      - name: Run FB Notice Bot
+        env:
+          PAGE_ID: ${{ secrets.PAGE_ID }}
+          PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
+        run: node automation.js
