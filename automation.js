@@ -110,6 +110,9 @@ async function captureScreenshot(url, filename) {
         const notices = await scrapeNotices(url);
 
         for (const notice of notices) {
+
+            console.log('🧾 NOTICE FOUND:', notice.title);
+            
             if (posted.includes(notice.id)) continue; // skip already posted
 
             const titleLower = notice.title.toLowerCase();
