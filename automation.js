@@ -16,7 +16,7 @@ if (fs.existsSync(POSTED_FILE)) {
 }
 
 // Allowed programs to post
-const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca'];
+const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca', 'phd'];
 
 // Detect GitHub Actions
 if (process.env.GITHUB_ACTIONS === 'true') {
