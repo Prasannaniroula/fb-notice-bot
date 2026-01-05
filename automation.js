@@ -3,7 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
-const puppeteer = require('puppeteer'); // full Puppeteer for GitHub Actions
+const puppeteer = require('puppeteer');
+const { PDFDocument } = require('pdf-lib');
+const { fromPath } = require('pdf2pic');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -15,8 +17,8 @@ if (fs.existsSync(POSTED_FILE)) {
     posted = JSON.parse(fs.readFileSync(POSTED_FILE, 'utf-8'));
 }
 
-// Allowed programs to post
-const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca', 'phd'];
+// Allowed programs
+const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca','phd'];
 
 // Detect GitHub Actions
 if (process.env.GITHUB_ACTIONS === 'true') {
@@ -26,13 +28,12 @@ if (process.env.GITHUB_ACTIONS === 'true') {
 
 // Notice URLs
 const IOE_URL = 'https://iost.tu.edu.np/notices';
-const TU_URL = 'https://tu.edu.np/notices'; // Replace with actual TU notice URL
+const TU_URL = 'https://ioe.tu.edu.np/notices'; // Replace with actual TU notice URL
 
-// Post notice to Facebook
+// Post to Facebook
 async function postToFB(message, imagePath = null) {
     try {
         if (imagePath) {
-            // Post as photo
             const form = new FormData();
             form.append('source', fs.createReadStream(imagePath));
             form.append('caption', message);
@@ -45,7 +46,6 @@ async function postToFB(message, imagePath = null) {
             const data = await res.json();
             console.log('Posted photo:', data);
         } else {
-            // Post as text/link
             const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -62,22 +62,30 @@ async function postToFB(message, imagePath = null) {
 // Scrape notices from a page
 async function scrapeNotices(url) {
     const browser = await puppeteer.launch({
-        headless: "new", // opt-in to new headless mode
+        headless: 'new', // use new headless mode
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
 
-    // Adjust selectors for your notice page
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
+    await page.waitForTimeout(2000);
+
+    // General scraping for IOE/IOST/TU notice pages
     const notices = await page.evaluate(() => {
         const items = [];
-        document.querySelectorAll('.notice-item').forEach(el => {
-            const id = el.getAttribute('data-id'); // unique ID
-            const title = el.querySelector('.notice-title')?.innerText || '';
-            const link = el.querySelector('a')?.href || '';
-            const type = el.querySelector('.notice-type')?.innerText || '';
-            items.push({ id, title, link, type });
+        document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper').forEach(el => {
+            const linkEl = el.querySelector('div.detail a, a');
+            const titleEl = linkEl?.querySelector('h5') || linkEl;
+            const dateEl = el.querySelector('div.date span.nep_date');
+
+            const link = linkEl?.href || '';
+            const title = titleEl?.innerText.trim() || '';
+            const date = dateEl?.innerText.trim() || '';
+            const type = title.toLowerCase();
+
+            const id = link; // unique ID
+            items.push({ id, title, link, type, date });
         });
         return items;
     });
@@ -86,19 +94,59 @@ async function scrapeNotices(url) {
     return notices;
 }
 
-// Capture screenshot of notice
-async function captureScreenshot(url, filename) {
-    const browser = await puppeteer.launch({
-        headless: "new", // opt-in to new headless mode
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+// Convert PDF pages to images
+async function pdfToImages(pdfUrl, baseFilename) {
+    const res = await fetch(pdfUrl);
+    const buffer = await res.arrayBuffer();
+    const pdfPath = path.join('/tmp', `${baseFilename}.pdf`);
+    fs.writeFileSync(pdfPath, Buffer.from(buffer));
+
+    const converter = fromPath(pdfPath, {
+        density: 150,
+        savePath: '/tmp',
+        format: 'png',
+        width: 1200,
+        height: 1600,
     });
-    
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
-    const filepath = path.join('/tmp', filename);
-    await page.screenshot({ path: filepath, fullPage: true });
-    await browser.close();
-    return filepath;
+
+    const pdfDoc = await PDFDocument.load(buffer);
+    const numPages = pdfDoc.getPageCount();
+
+    const imagePaths = [];
+    for (let i = 1; i <= numPages; i++) {
+        const output = await converter(i);
+        imagePaths.push(output.path);
+    }
+
+    return { pdfPath, imagePaths };
+}
+
+// Handle each notice (PDF, image, or link)
+async function handleNoticeMedia(notice) {
+    const message = `${notice.title}\n${notice.link}`;
+    const baseFilename = notice.id.replace(/[^a-z0-9]/gi, '_');
+
+    try {
+        if (notice.link.endsWith('.pdf') || notice.type.includes('result') || notice.type.includes('exam')) {
+            const { pdfPath, imagePaths } = await pdfToImages(notice.link, baseFilename);
+            for (const img of imagePaths) {
+                await postToFB(message, img);
+                fs.unlinkSync(img);
+            }
+            fs.unlinkSync(pdfPath);
+        } else if (notice.link.match(/\.(jpg|jpeg|png)$/i)) {
+            const imgPath = path.join('/tmp', `${baseFilename}${path.extname(notice.link)}`);
+            const res = await fetch(notice.link);
+            const buffer = await res.arrayBuffer();
+            fs.writeFileSync(imgPath, Buffer.from(buffer));
+            await postToFB(message, imgPath);
+            fs.unlinkSync(imgPath);
+        } else {
+            await postToFB(message);
+        }
+    } catch (err) {
+        console.error('Error handling notice media:', err);
+    }
 }
 
 // Main function
@@ -110,44 +158,31 @@ async function captureScreenshot(url, filename) {
         const notices = await scrapeNotices(url);
 
         for (const notice of notices) {
-
             console.log('🧾 NOTICE FOUND:', notice.title);
-            
-            if (posted.includes(notice.id)) continue; // skip already posted
+
+            if (posted.includes(notice.id)) continue;
 
             const titleLower = notice.title.toLowerCase();
-            const typeLower = notice.type.toLowerCase();
 
-            // Skip Degree/Master notices
-            if (titleLower.includes('degree') || titleLower.includes('master') ||
-                typeLower.includes('degree') || typeLower.includes('master')) {
-                console.log(`⛔ Skipping Degree/Master notice: ${notice.title}`);
+            // Skip Degree/Master/PhD
+            if (titleLower.includes('degree') || titleLower.includes('master')) {
+                console.log(`⛔ Skipping Degree/Master/PhD notice: ${notice.title}`);
                 continue;
             }
 
-            // Skip notices not in allowed programs
-            const matchesProgram = allowedPrograms.some(prog => titleLower.includes(prog) || typeLower.includes(prog));
+            // Skip non-target programs
+            const matchesProgram = allowedPrograms.some(prog => titleLower.includes(prog));
             if (!matchesProgram) {
                 console.log(`⛔ Skipping non-target program notice: ${notice.title}`);
                 continue;
             }
 
-            const message = `${notice.title}\n${notice.link}`;
-
-            if (typeLower.includes('result') || typeLower.includes('exam')) {
-                const filename = `${notice.id}.png`;
-                const imagePath = await captureScreenshot(notice.link, filename);
-                await postToFB(message, imagePath);
-                fs.unlinkSync(imagePath); // delete screenshot after posting
-            } else {
-                await postToFB(message);
-            }
-
-            posted.push(notice.id); // mark as posted
+            // Handle PDF / Image / Link
+            await handleNoticeMedia(notice);
+            posted.push(notice.id);
         }
     }
 
-    // Save posted notices temporarily
     fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
     console.log('✅ Automation finished!');
 })();
