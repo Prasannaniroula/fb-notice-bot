@@ -3,8 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
-const chromium = require('chrome-aws-lambda');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer'); // full Puppeteer for GitHub Actions
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -62,13 +61,7 @@ async function postToFB(message, imagePath = null) {
 
 // Scrape notices from a page
 async function scrapeNotices(url) {
-    const browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath,
-        headless: true
-    });
-
+    const browser = await puppeteer.launch({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
 
@@ -91,13 +84,7 @@ async function scrapeNotices(url) {
 
 // Capture screenshot of notice
 async function captureScreenshot(url, filename) {
-    const browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath,
-        headless: true
-    });
-
+    const browser = await puppeteer.launch({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
     const filepath = path.join('/tmp', filename);
@@ -140,7 +127,7 @@ async function captureScreenshot(url, filename) {
                 const filename = `${notice.id}.png`;
                 const imagePath = await captureScreenshot(notice.link, filename);
                 await postToFB(message, imagePath);
-                fs.unlinkSync(imagePath);
+                fs.unlinkSync(imagePath); // delete screenshot after posting
             } else {
                 await postToFB(message);
             }
