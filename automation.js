@@ -24,7 +24,7 @@ const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca', 'phd'];
 // Ensure notice directory exists
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
 
-// Load posted notices safely
+// Load posted notices
 let posted = [];
 if (fs.existsSync(POSTED_FILE)) {
     try {
@@ -34,41 +34,21 @@ if (fs.existsSync(POSTED_FILE)) {
         posted = [];
     }
 }
-
-// Always keep only last 12 on startup
 posted = posted.slice(-MAX_POSTED);
 
-// Detect GitHub Actions
-if (process.env.GITHUB_ACTIONS === 'true') {
-    console.log('✅ Running inside GitHub Actions');
-    console.log('🕒', new Date().toLocaleString());
-}
-
 // ================= FACEBOOK =================
-async function postToFB(message, imagePath = null) {
-    try {
-        if (imagePath) {
-            const form = new FormData();
-            form.append('source', fs.createReadStream(imagePath));
-            form.append('caption', message);
-            form.append('access_token', PAGE_ACCESS_TOKEN);
+async function postToFB(message, imagePath) {
+    const form = new FormData();
+    form.append('source', fs.createReadStream(imagePath));
+    form.append('caption', message);
+    form.append('access_token', PAGE_ACCESS_TOKEN);
 
-            const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
-                method: 'POST',
-                body: form
-            });
-            console.log('📸 FB Photo:', await res.json());
-        } else {
-            const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message, access_token: PAGE_ACCESS_TOKEN })
-            });
-            console.log('📝 FB Text:', await res.json());
-        }
-    } catch (err) {
-        console.error('❌ FB Error:', err);
-    }
+    const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
+        method: 'POST',
+        body: form
+    });
+
+    console.log('📸 FB:', await res.json());
 }
 
 // ================= SCRAPER =================
@@ -104,16 +84,14 @@ async function scrapeNotices(url) {
 }
 
 // ================= PDF → IMAGE =================
-async function pdfToImages(pdfUrl, baseFilename) {
+async function pdfToImage(pdfUrl, noticeId) {
     const res = await fetch(pdfUrl);
     const buffer = await res.arrayBuffer();
 
-    const pdfPath = path.join('/tmp', `${baseFilename}.pdf`);
+    const pdfPath = path.join('/tmp', `${noticeId}.pdf`);
     fs.writeFileSync(pdfPath, Buffer.from(buffer));
 
     const pdfDoc = await PDFDocument.load(buffer);
-    const numPages = pdfDoc.getPageCount();
-
     const converter = fromPath(pdfPath, {
         density: 150,
         savePath: '/tmp',
@@ -122,36 +100,52 @@ async function pdfToImages(pdfUrl, baseFilename) {
         height: 1600
     });
 
-    const imagePaths = [];
-    for (let i = 1; i <= numPages; i++) {
-        const output = await converter(i);
-        imagePaths.push(output.path);
-    }
+    const output = await converter(1); // FIRST PAGE ONLY
+    fs.unlinkSync(pdfPath);
+    return output.path;
+}
 
-    return { pdfPath, imagePaths };
+// ================= SCREENSHOT NOTICE =================
+async function screenshotNotice(noticeUrl, noticeId) {
+    const browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 2000 });
+    await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
+    await page.waitForTimeout(2000);
+
+    const imagePath = path.join('/tmp', `${noticeId}.png`);
+
+    // Try notice content first
+    const element =
+        await page.$('div.single-post, div.notice-content, article') ||
+        await page.$('body');
+
+    await element.screenshot({ path: imagePath });
+    await browser.close();
+
+    return imagePath;
 }
 
 // ================= NOTICE HANDLER =================
-async function handleNoticeMedia(notice, noticeId) {
+async function handleNotice(notice, noticeId) {
     const message = `${notice.title}\n${notice.link}`;
-    const baseFilename = noticeId.slice(0, 12); // safe filename
 
-    if (notice.link.endsWith('.pdf') || notice.type.includes('result') || notice.type.includes('exam')) {
-        const { pdfPath, imagePaths } = await pdfToImages(notice.link, baseFilename);
-        for (const img of imagePaths) {
-            await postToFB(message, img);
-            fs.unlinkSync(img);
-        }
-        fs.unlinkSync(pdfPath);
-    } else if (notice.link.match(/\.(jpg|jpeg|png)$/i)) {
-        const imgPath = path.join('/tmp', `${baseFilename}.png`);
-        const res = await fetch(notice.link);
-        fs.writeFileSync(imgPath, Buffer.from(await res.arrayBuffer()));
-        await postToFB(message, imgPath);
-        fs.unlinkSync(imgPath);
-    } else {
-        await postToFB(message);
+    // PDF → image
+    if (notice.link.endsWith('.pdf')) {
+        const img = await pdfToImage(notice.link, noticeId);
+        await postToFB(message, img);
+        fs.unlinkSync(img);
+        return;
     }
+
+    // HTML notice → screenshot
+    const img = await screenshotNotice(notice.link, noticeId);
+    await postToFB(message, img);
+    fs.unlinkSync(img);
 }
 
 // ================= MAIN =================
@@ -178,11 +172,10 @@ async function handleNoticeMedia(notice, noticeId) {
             const titleLower = notice.title.toLowerCase();
 
             if (titleLower.includes('degree') || titleLower.includes('master')) continue;
-
             if (!allowedPrograms.some(p => titleLower.includes(p))) continue;
 
             console.log('🆕 Posting:', notice.title);
-            await handleNoticeMedia(notice, noticeId);
+            await handleNotice(notice, noticeId);
 
             posted.push(noticeId);
             if (posted.length > MAX_POSTED) {
