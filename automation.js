@@ -113,22 +113,54 @@ async function screenshotNotice(noticeUrl, noticeId) {
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 2000 });
+    await page.setViewport({ width: 1280, height: 2200 });
+
     await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
     await page.waitForTimeout(2000);
 
     const imagePath = path.join('/tmp', `${noticeId}.png`);
 
-    // Try notice content first
-    const element =
-        await page.$('div.single-post, div.notice-content, article') ||
-        await page.$('body');
+    // Try best selectors in order
+    const selectors = [
+        'div.single-post',
+        'div.post-content',
+        'article',
+        'div.col-md-8',
+        'div.col-lg-8'
+    ];
 
-    await element.screenshot({ path: imagePath });
+    let element = null;
+    for (const selector of selectors) {
+        element = await page.$(selector);
+        if (element) break;
+    }
+
+    if (element) {
+        // Scroll element into view
+        await element.evaluate(el => el.scrollIntoView());
+        await page.waitForTimeout(500);
+
+        await element.screenshot({
+            path: imagePath
+        });
+    } else {
+        // Fallback: crop middle of page (better than full page)
+        const pageHeight = await page.evaluate(() => document.body.scrollHeight);
+        await page.screenshot({
+            path: imagePath,
+            clip: {
+                x: 0,
+                y: 300,
+                width: 1280,
+                height: Math.min(pageHeight - 600, 1600)
+            }
+        });
+    }
+
     await browser.close();
-
     return imagePath;
 }
+
 
 // ================= NOTICE HANDLER =================
 async function handleNotice(notice, noticeId) {
