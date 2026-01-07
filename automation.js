@@ -18,7 +18,7 @@ const MAX_POSTED = 12;
 const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
 
-const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca', 'phd'];
+const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca'];
 const importantKeywords = [
   'सूचना','जरुरी','अत्यन्त','परिक्षा','नतिजा','फर्म','सूची',
   'notice','result','exam','routine','model','course','published','request','entrance'
@@ -129,9 +129,10 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
 }
 
 // ================= FILTER =================
+const notAllowedProgram = ['degree','master','phd','स्नातकाेत्तर','m.sc.','cas','प्रमुख छनौट','विद्यावारिधि','बाेलपत्र']
 function shouldPost(title) {
   const t = title.toLowerCase();
-  if (t.includes('degree') || t.includes('master')) return false;
+  if (notAllowedProgram.some(q => t.includes(q))) return false;
   return (
     importantKeywords.some(k => t.includes(k)) ||
     allowedPrograms.some(p => t.includes(p))
