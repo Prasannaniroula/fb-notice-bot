@@ -2,7 +2,7 @@ name: Facebook Notice Bot
 
 on:
   schedule:
-    - cron: "0 */4 * * *"   # every 4 hours
+    - cron: "0 */4 * * *"   # runs every 4 hours (UTC)
   workflow_dispatch:
 
 jobs:
@@ -10,39 +10,40 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm'
 
-      # ✅ ADD THIS STEP
-      - name: Install Nepali fonts (for Puppeteer)
+      # ✅ Install Unicode Nepali (Devanagari) fonts
+      - name: Install Nepali fonts for Puppeteer
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             fonts-noto \
             fonts-noto-core \
             fonts-noto-ui-core \
-            fonts-lohit-devanagari
+            fonts-noto-unhinted
 
-      - name: Install dependencies
+      - name: Install NPM dependencies
         run: npm install
 
-      - name: Run automation
+      - name: Run notice automation
         env:
           PAGE_ID: ${{ secrets.PAGE_ID }}
           PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
         run: node automation.js
 
-      - name: Commit notice memory
+      - name: Commit posted notice memory
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions@users.noreply.github.com"
           git add notice/posted.json
-          git commit -m "Update posted notices" || echo "No changes"
+          git commit -m "Update posted notices" || echo "No changes to commit"
           git push
