@@ -2,7 +2,7 @@ name: Facebook Notice Bot
 
 on:
   schedule:
-    - cron: "0 */4 * * *"   # runs every 4 hours (UTC)
+    - cron: "0 */4 * * *"   # every 4 hours (UTC)
   workflow_dispatch:
 
 jobs:
@@ -21,8 +21,8 @@ jobs:
           node-version: 18
           cache: 'npm'
 
-      # ✅ Install Unicode Nepali (Devanagari) fonts
-      - name: Install Nepali fonts for Puppeteer
+      # ✅ Install Nepali (Devanagari) fonts for Puppeteer
+      - name: Install Nepali fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -34,10 +34,12 @@ jobs:
       - name: Install NPM dependencies
         run: npm install
 
+      # ✅ Run automation (TLS + Facebook secrets)
       - name: Run notice automation
         env:
           PAGE_ID: ${{ secrets.PAGE_ID }}
           PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: node automation.js
 
       - name: Commit posted notice memory
