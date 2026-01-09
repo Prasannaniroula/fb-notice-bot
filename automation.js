@@ -25,7 +25,7 @@ const importantKeywords = [
 ];
 
 const notAllowedProgram = [
-  'degree','master','phd','msc','m.sc','cas','scholarship',
+  'degree','master','phd','msc','m.sc','scholarship',
   'स्नातकोत्तर','विद्यावारिधि','प्रमुख छनौट','बोलपत्र'
 ];
 // =========================================
