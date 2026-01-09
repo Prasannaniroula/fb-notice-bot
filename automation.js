@@ -5,7 +5,6 @@ const crypto = require('crypto');
 const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
-const { PDFDocument } = require('pdf-lib');
 const { fromPath } = require('pdf2pic');
 
 const PAGE_ID = process.env.PAGE_ID;
@@ -19,9 +18,15 @@ const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
 
 const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca'];
+
 const importantKeywords = [
   'सूचना','जरुरी','अत्यन्त','परिक्षा','नतिजा','फर्म','सूची',
   'notice','result','exam','routine','model','course','published','request','entrance'
+];
+
+const notAllowedProgram = [
+  'degree','master','phd','msc','m.sc','cas','scholarship',
+  'स्नातकोत्तर','विद्यावारिधि','प्रमुख छनौट','बोलपत्र'
 ];
 // =========================================
 
@@ -77,6 +82,18 @@ async function scrapeNotices(page, url) {
   });
 }
 
+// ================= DEEP PDF DETECTOR =================
+async function getDeepPdfLink(page, noticeUrl) {
+  await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
+  await page.waitForTimeout(2000);
+
+  return await page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll('a'));
+    const pdf = links.find(a => a.href && a.href.toLowerCase().includes('.pdf'));
+    return pdf ? pdf.href : null;
+  });
+}
+
 // ================= PDF → IMAGE =================
 async function pdfToImage(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl);
@@ -103,6 +120,15 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
   await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
   await page.waitForTimeout(2000);
 
+  // FORCE NEPALI FONT RENDERING
+  await page.addStyleTag({
+    content: `
+      * {
+        font-family: 'Noto Sans Devanagari', 'Kalimati', 'Mangal', sans-serif !important;
+      }
+    `
+  });
+
   const imagePath = path.join('/tmp', `${noticeId}.png`);
 
   const selectors = [
@@ -123,16 +149,16 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
     }
   }
 
-  // Safe fallback
   await page.screenshot({ path: imagePath, fullPage: true });
   return imagePath;
 }
 
 // ================= FILTER =================
-const notAllowedProgram = ['degree','master','phd','स्नातकाेत्तर','m.sc.','cas','प्रमुख छनौट','विद्यावारिधि','बाेलपत्र']
 function shouldPost(title) {
   const t = title.toLowerCase();
+
   if (notAllowedProgram.some(q => t.includes(q))) return false;
+
   return (
     importantKeywords.some(k => t.includes(k)) ||
     allowedPrograms.some(p => t.includes(p))
@@ -166,13 +192,19 @@ function shouldPost(title) {
         continue;
       }
 
-      if (!shouldPost(notice.title)) continue;
+      if (!shouldPost(notice.title)) {
+        console.log('🚫 Filtered:', notice.title);
+        continue;
+      }
 
       console.log('🆕 Posting:', notice.title);
 
       let img;
-      if (notice.link.endsWith('.pdf')) {
-        img = await pdfToImage(notice.link, noticeId);
+      const deepPdf = await getDeepPdfLink(page, notice.link);
+
+      if (deepPdf) {
+        console.log('📄 PDF found:', deepPdf);
+        img = await pdfToImage(deepPdf, noticeId);
       } else {
         img = await screenshotNotice(page, notice.link, noticeId);
       }
