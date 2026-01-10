@@ -1,9 +1,9 @@
 name: Facebook Notice Bot
 
 on:
-  schedule:
-    - cron: "0 */4 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
 
 jobs:
   run-bot:
