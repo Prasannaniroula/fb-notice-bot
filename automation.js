@@ -61,13 +61,16 @@ async function postToFBSinglePost(message, imagePaths) {
         method: 'POST',
         body: form
       });
+
+      // READ RESPONSE ONCE
+      const text = await res.text();
       try {
-        data = await res.json();
+        data = JSON.parse(text);
       } catch (err) {
-        const text = await res.text();
         console.error('❌ Failed to parse FB response:', text);
         continue; // skip this image
       }
+
     } catch (err) {
       console.error('❌ Network error uploading image:', err);
       continue; // skip this image
@@ -95,11 +98,12 @@ async function postToFBSinglePost(message, imagePaths) {
         method: 'POST',
         body: postForm
       });
+
+      const text = await postRes.text();
       try {
-        const postData = await postRes.json();
+        const postData = JSON.parse(text);
         console.log('📸 FB Post:', postData);
       } catch (err) {
-        const text = await postRes.text();
         console.error('❌ Failed to parse FB post response:', text);
       }
     } catch (err) {
