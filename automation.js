@@ -51,36 +51,48 @@ async function postToFBSinglePost(message, imagePaths) {
   const mediaIds = [];
 
   for (const img of imagePaths) {
-    const form = new FormData();
-    form.append('source', fs.createReadStream(img));
-    form.append('access_token', PAGE_ACCESS_TOKEN);
+    let uploaded = false;
+    for (let attempt = 1; attempt <= 3 && !uploaded; attempt++) {
+      const form = new FormData();
+      form.append('source', fs.createReadStream(img));
+      form.append('access_token', PAGE_ACCESS_TOKEN);
 
-    let data;
-    try {
-      const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
-        method: 'POST',
-        body: form
-      });
-
-      // READ RESPONSE ONCE
-      const text = await res.text();
       try {
-        data = JSON.parse(text);
+        const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
+          method: 'POST',
+          body: form
+        });
+
+        const text = await res.text(); // read body once
+
+        if (!text) {
+          console.warn(`⚠️ FB returned empty response for ${img} (Attempt ${attempt})`);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+          continue; // retry
+        }
+
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (err) {
+          console.error(`❌ Failed to parse FB response for ${img} (Attempt ${attempt}):`, text);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+          continue; // retry
+        }
+
+        if (data.id) {
+          mediaIds.push({ media_fbid: data.id });
+          console.log('✅ Uploaded image:', img);
+          uploaded = true;
+        } else {
+          console.error(`❌ FB did not return media ID for ${img} (Attempt ${attempt}):`, data);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+        }
+
       } catch (err) {
-        console.error('❌ Failed to parse FB response:', text);
-        continue; // skip this image
+        console.error(`❌ Network error uploading ${img} (Attempt ${attempt}):`, err);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
       }
-
-    } catch (err) {
-      console.error('❌ Network error uploading image:', err);
-      continue; // skip this image
-    }
-
-    if (data.id) {
-      mediaIds.push({ media_fbid: data.id });
-      console.log('✅ Uploaded image:', img);
-    } else {
-      console.error('❌ Failed to upload image:', data);
     }
 
     // Small delay between uploads to avoid throttling
@@ -100,19 +112,25 @@ async function postToFBSinglePost(message, imagePaths) {
       });
 
       const text = await postRes.text();
+      if (!text) {
+        console.warn('⚠️ FB returned empty response for feed post');
+        return;
+      }
+
       try {
         const postData = JSON.parse(text);
         console.log('📸 FB Post:', postData);
       } catch (err) {
-        console.error('❌ Failed to parse FB post response:', text);
+        console.error('❌ Failed to parse FB feed post response:', text);
       }
     } catch (err) {
-      console.error('❌ Network error creating FB post:', err);
+      console.error('❌ Network error creating FB feed post:', err);
     }
   } else {
     console.warn('⚠️ No images uploaded, skipping FB post');
   }
 }
+
 
 // ================= SCRAPER =================
 async function scrapeNotices(page, url) {
