@@ -55,13 +55,33 @@ async function postToFBSinglePost(message, imagePaths) {
     form.append('source', fs.createReadStream(img));
     form.append('access_token', PAGE_ACCESS_TOKEN);
 
-    const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
-      method: 'POST',
-      body: form
-    });
-    const data = await res.json();
-    if (data.id) mediaIds.push({ media_fbid: data.id });
-    else console.error('❌ Failed to upload image:', img, data);
+    let data;
+    try {
+      const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
+        method: 'POST',
+        body: form
+      });
+      try {
+        data = await res.json();
+      } catch (err) {
+        const text = await res.text();
+        console.error('❌ Failed to parse FB response:', text);
+        continue; // skip this image
+      }
+    } catch (err) {
+      console.error('❌ Network error uploading image:', err);
+      continue; // skip this image
+    }
+
+    if (data.id) {
+      mediaIds.push({ media_fbid: data.id });
+      console.log('✅ Uploaded image:', img);
+    } else {
+      console.error('❌ Failed to upload image:', data);
+    }
+
+    // Small delay between uploads to avoid throttling
+    await new Promise(r => setTimeout(r, 1000));
   }
 
   if (mediaIds.length > 0) {
@@ -70,11 +90,23 @@ async function postToFBSinglePost(message, imagePaths) {
     postForm.append('attached_media', JSON.stringify(mediaIds));
     postForm.append('access_token', PAGE_ACCESS_TOKEN);
 
-    const postRes = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
-      method: 'POST',
-      body: postForm
-    });
-    console.log('📸 FB Post:', await postRes.json());
+    try {
+      const postRes = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
+        method: 'POST',
+        body: postForm
+      });
+      try {
+        const postData = await postRes.json();
+        console.log('📸 FB Post:', postData);
+      } catch (err) {
+        const text = await postRes.text();
+        console.error('❌ Failed to parse FB post response:', text);
+      }
+    } catch (err) {
+      console.error('❌ Network error creating FB post:', err);
+    }
+  } else {
+    console.warn('⚠️ No images uploaded, skipping FB post');
   }
 }
 
@@ -142,6 +174,9 @@ async function pdfToImages(pdfUrl, noticeId) {
 
     await converter(i); // generate page image
     imagePaths.push(imgPath);
+
+    // Small delay to avoid PDF page conversion issues
+    await new Promise(r => setTimeout(r, 500));
   }
 
   fs.unlinkSync(pdfPath);
