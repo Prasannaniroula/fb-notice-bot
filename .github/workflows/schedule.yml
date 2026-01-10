@@ -3,7 +3,7 @@ name: Facebook Notice Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */24 * * *"
+    - cron: "0 0 * * *"   # once every 24 hours (UTC)
 
 jobs:
   run-bot:
@@ -21,9 +21,13 @@ jobs:
       - name: Install Nepali fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-noto fonts-noto-core fonts-noto-ui-core fonts-noto-unhinted
+          sudo apt-get install -y \
+            fonts-noto \
+            fonts-noto-core \
+            fonts-noto-ui-core \
+            fonts-noto-unhinted
 
-      - name: Install GraphicsMagick 
+      - name: Install GraphicsMagick
         run: |
           sudo apt-get install -y graphicsmagick
 
@@ -36,7 +40,6 @@ jobs:
         env:
           PAGE_ID: ${{ secrets.PAGE_ID }}
           PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
-          NODE_TLS_REJECT_UNAUTHORIZED: "0"
         run: node automation.js
 
       - name: Commit posted notice memory

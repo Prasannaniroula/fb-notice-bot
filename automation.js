@@ -1,4 +1,3 @@
-// automation.js
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -11,12 +10,12 @@ const { PDFDocument } = require('pdf-lib');
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
-// ================= CONFIG =================
+/* ================= CONFIG ================= */
 const POSTED_FILE = path.join(__dirname, 'notice', 'posted.json');
 const MAX_POSTED = 12;
 
 const IOE_URL = 'https://iost.tu.edu.np/notices';
-const TU_URL = 'https://ioe.tu.edu.np/notices';
+const TU_URL  = 'https://ioe.tu.edu.np/notices';
 
 const allowedPrograms = ['csit','bit','bba','engineering','bca'];
 
@@ -29,16 +28,14 @@ const notAllowedProgram = [
   'degree','phd','msc','m.sc','scholarship','cas',
   'स्नातकोत्तर','विद्यावारिधि','प्रमुख छनौट','बोलपत्र'
 ];
-// =========================================
+/* ========================================= */
 
-// Ensure notice directory exists
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
 
-// Load posted notices
 let posted = [];
 if (fs.existsSync(POSTED_FILE)) {
   try {
-    posted = JSON.parse(fs.readFileSync(POSTED_FILE, 'utf-8'));
+    posted = JSON.parse(fs.readFileSync(POSTED_FILE, 'utf8'));
     if (!Array.isArray(posted)) posted = [];
   } catch {
     posted = [];
@@ -46,213 +43,170 @@ if (fs.existsSync(POSTED_FILE)) {
 }
 posted = posted.slice(-MAX_POSTED);
 
-// ================= FACEBOOK =================
+/* ================= FACEBOOK ================= */
 async function postToFBSinglePost(message, imagePaths) {
   const mediaIds = [];
 
   for (const img of imagePaths) {
     let uploaded = false;
+
     for (let attempt = 1; attempt <= 3 && !uploaded; attempt++) {
       const form = new FormData();
       form.append('source', fs.createReadStream(img));
+      form.append('published', 'false');
       form.append('access_token', PAGE_ACCESS_TOKEN);
 
       try {
-        const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
-          method: 'POST',
-          body: form
-        });
+        const res = await fetch(
+          `https://graph.facebook.com/v19.0/${PAGE_ID}/photos`,
+          { method: 'POST', body: form }
+        );
 
-        const text = await res.text(); // read body once
+        const text = await res.text();
 
         if (!text) {
-          console.warn(`⚠️ FB returned empty response for ${img} (Attempt ${attempt})`);
-          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
-          continue; // retry
+          console.warn(`⚠️ Empty FB response (${attempt}) for ${img}`);
+          await delay(2000);
+          continue;
         }
 
-        let data;
-        try {
-          data = JSON.parse(text);
-        } catch (err) {
-          console.error(`❌ Failed to parse FB response for ${img} (Attempt ${attempt}):`, text);
-          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
-          continue; // retry
-        }
+        const data = JSON.parse(text);
 
         if (data.id) {
           mediaIds.push({ media_fbid: data.id });
-          console.log('✅ Uploaded image:', img);
           uploaded = true;
+          console.log('✅ Uploaded:', path.basename(img));
         } else {
-          console.error(`❌ FB did not return media ID for ${img} (Attempt ${attempt}):`, data);
-          if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+          console.error('❌ FB upload error:', data);
+          await delay(2000);
         }
 
       } catch (err) {
-        console.error(`❌ Network error uploading ${img} (Attempt ${attempt}):`, err);
-        if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+        console.error('❌ Upload failed:', err.message);
+        await delay(2000);
       }
     }
 
-    // Small delay between uploads to avoid throttling
-    await new Promise(r => setTimeout(r, 1000));
+    // Delay between image uploads
+    await delay(2500);
   }
 
-  if (mediaIds.length > 0) {
-    const postForm = new FormData();
-    postForm.append('message', message);
-    postForm.append('attached_media', JSON.stringify(mediaIds));
-    postForm.append('access_token', PAGE_ACCESS_TOKEN);
+  if (!mediaIds.length) {
+    console.warn('⚠️ No images uploaded, skipping post');
+    return;
+  }
 
-    try {
-      const postRes = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
-        method: 'POST',
-        body: postForm
-      });
+  const postForm = new FormData();
+  postForm.append('message', message);
+  postForm.append('attached_media', JSON.stringify(mediaIds));
+  postForm.append('access_token', PAGE_ACCESS_TOKEN);
 
-      const text = await postRes.text();
-      if (!text) {
-        console.warn('⚠️ FB returned empty response for feed post');
-        return;
-      }
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v19.0/${PAGE_ID}/feed`,
+      { method: 'POST', body: postForm }
+    );
 
-      try {
-        const postData = JSON.parse(text);
-        console.log('📸 FB Post:', postData);
-      } catch (err) {
-        console.error('❌ Failed to parse FB feed post response:', text);
-      }
-    } catch (err) {
-      console.error('❌ Network error creating FB feed post:', err);
+    const text = await res.text();
+    if (!text) {
+      console.warn('⚠️ Empty response when creating post');
+      return;
     }
-  } else {
-    console.warn('⚠️ No images uploaded, skipping FB post');
+
+    console.log('📸 FB POST:', JSON.parse(text));
+  } catch (err) {
+    console.error('❌ Post creation failed:', err.message);
   }
 }
 
-
-// ================= SCRAPER =================
+/* ================= SCRAPER ================= */
 async function scrapeNotices(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
-  await page.waitForTimeout(2000);
+  await delay(2000);
 
-  return await page.evaluate(() => {
-    return Array.from(
-      document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper')
-    ).map(el => {
-      const linkEl = el.querySelector('div.detail a, a');
-      const titleEl = linkEl?.querySelector('h5') || linkEl;
-      const dateEl = el.querySelector('div.date span.nep_date');
-
-      return {
-        title: titleEl?.innerText.trim() || '',
-        link: linkEl?.href || '',
-        date: dateEl?.innerText.trim() || ''
-      };
-    }).filter(n => n.title && n.link);
-  });
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper'))
+      .map(el => {
+        const a = el.querySelector('a');
+        return {
+          title: a?.innerText.trim() || '',
+          link: a?.href || ''
+        };
+      })
+      .filter(n => n.title && n.link)
+  );
 }
 
-// ================= DEEP PDF DETECTOR =================
+/* ================= PDF LINK ================= */
 async function getDeepPdfLink(page, noticeUrl) {
   await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
-  await page.waitForTimeout(2000);
+  await delay(2000);
 
-  return await page.evaluate(() => {
-    const links = Array.from(document.querySelectorAll('a'));
-    const pdf = links.find(a => a.href && a.href.toLowerCase().includes('.pdf'));
-    return pdf ? pdf.href : null;
+  return page.evaluate(() => {
+    const a = Array.from(document.querySelectorAll('a'))
+      .find(x => x.href && x.href.toLowerCase().endsWith('.pdf'));
+    return a ? a.href : null;
   });
 }
 
-// ================= PDF → IMAGE (ALL PAGES) =================
+/* ================= PDF → IMAGES ================= */
 async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl);
   const buffer = await res.arrayBuffer();
 
-  const pdfPath = path.join('/tmp', `${noticeId}.pdf`);
+  const pdfPath = `/tmp/${noticeId}.pdf`;
   fs.writeFileSync(pdfPath, Buffer.from(buffer));
 
-  const pdfDoc = await PDFDocument.load(Buffer.from(buffer));
-  const totalPages = pdfDoc.getPageCount();
+  const pdfDoc = await PDFDocument.load(buffer);
+  const pages = pdfDoc.getPageCount();
 
-  const imagePaths = [];
+  const images = [];
 
-  for (let i = 1; i <= totalPages; i++) {
-    const timestamp = Date.now();
-    const imgPath = path.join('/tmp', `${noticeId}-page-${i}-${timestamp}.png`);
-
+  for (let i = 1; i <= pages; i++) {
+    const name = `${noticeId}-page-${i}-${Date.now()}`;
     const converter = fromPath(pdfPath, {
-      density: 150,
+      density: 96,
       savePath: '/tmp',
-      saveFilename: `${noticeId}-page-${i}-${timestamp}`,
+      saveFilename: name,
       format: 'png',
-      width: 1200,
-      height: 1600,
-      graphicsMagick: false,
-      quality: 100
+      width: 960,
+      height: 1280,
+      quality: 75
     });
 
-    await converter(i); // generate page image
-    imagePaths.push(imgPath);
-
-    // Small delay to avoid PDF page conversion issues
-    await new Promise(r => setTimeout(r, 500));
+    await converter(i);
+    images.push(`/tmp/${name}.png`);
+    await delay(500);
   }
 
   fs.unlinkSync(pdfPath);
-  return imagePaths;
+  return images.slice(0, 10); // FB limit
 }
 
-// ================= SCREENSHOT NOTICE =================
-async function screenshotNotice(page, noticeUrl, noticeId) {
-  await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
-  await page.waitForTimeout(2000);
+/* ================= SCREENSHOT ================= */
+async function screenshotNotice(page, url, noticeId) {
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
+  await delay(2000);
 
-  await page.addStyleTag({
-    content: `
-      * {
-        font-family: 'Noto Sans Devanagari', 'Kalimati', 'Mangal', sans-serif !important;
-      }
-    `
-  });
-
-  const imagePath = path.join('/tmp', `${noticeId}-screenshot.png`);
-
-  const selectors = [
-    'div.single-post',
-    'div.post-content',
-    'article',
-    'div.col-md-8',
-    'div.col-lg-8'
-  ];
-
-  for (const selector of selectors) {
-    const el = await page.$(selector);
-    if (el) {
-      await el.evaluate(e => e.scrollIntoView());
-      await page.waitForTimeout(500);
-      await el.screenshot({ path: imagePath });
-      return imagePath;
-    }
-  }
-
-  await page.screenshot({ path: imagePath, fullPage: true });
-  return imagePath;
+  const img = `/tmp/${noticeId}-screenshot.png`;
+  await page.screenshot({ path: img, fullPage: true });
+  return img;
 }
 
-// ================= FILTER =================
+/* ================= FILTER ================= */
 function shouldPost(title) {
   const t = title.toLowerCase();
-  if (notAllowedProgram.some(q => t.includes(q))) return false;
+  if (notAllowedProgram.some(x => t.includes(x))) return false;
   return (
     importantKeywords.some(k => t.includes(k)) ||
     allowedPrograms.some(p => t.includes(p))
   );
 }
 
-// ================= MAIN =================
+/* ================= UTILS ================= */
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+/* ================= MAIN ================= */
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -260,44 +214,39 @@ function shouldPost(title) {
   });
 
   const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 2200 });
 
   for (const url of [IOE_URL, TU_URL]) {
     console.log('🔍 Scraping:', url);
     const notices = await scrapeNotices(page, url);
 
     for (const notice of notices) {
-      const noticeId = crypto
-        .createHash('sha256')
+      const id = crypto.createHash('sha256')
         .update(notice.title + notice.link)
         .digest('hex');
 
-      if (posted.includes(noticeId)) continue;
+      if (posted.includes(id)) continue;
       if (!shouldPost(notice.title)) continue;
 
       console.log('🆕 Posting:', notice.title);
 
       const pdf = await getDeepPdfLink(page, notice.link);
-      let images = [];
+      let images = pdf
+        ? await pdfToImages(pdf, id)
+        : [await screenshotNotice(page, notice.link, id)];
 
-      if (pdf) {
-        images = await pdfToImages(pdf, noticeId); // all PDF pages
-      } else {
-        images = [await screenshotNotice(page, notice.link, noticeId)];
-      }
-
-      // Post all images in ONE Facebook post with title + link
       await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
 
-      // Clean up images
-      for (const img of images) fs.unlinkSync(img);
+      images.forEach(img => fs.existsSync(img) && fs.unlinkSync(img));
 
-      posted.push(noticeId);
+      posted.push(id);
       posted = posted.slice(-MAX_POSTED);
       fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
+
+      console.log('⏳ Waiting 1 minute...');
+      await delay(60_000);
     }
   }
 
   await browser.close();
-  console.log('✅ Done | Stored last 12 notices');
+  console.log('✅ DONE');
 })();
