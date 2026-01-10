@@ -94,7 +94,7 @@ async function getDeepPdfLink(page, noticeUrl) {
   });
 }
 
-// ================= PDF → IMAGE =================
+// ================= PDF → IMAGE (FIXED) =================
 async function pdfToImage(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl);
   const buffer = await res.arrayBuffer();
@@ -107,11 +107,14 @@ async function pdfToImage(pdfUrl, noticeId) {
     savePath: '/tmp',
     format: 'png',
     width: 1200,
-    height: 1600
+    height: 1600,
+    graphicsMagick: false,   // 🔥 THIS FIXES THE ERROR
+    quality: 100
   });
 
-  const output = await converter(1); // FIRST PAGE ONLY
+  const output = await converter(1); // first page only
   fs.unlinkSync(pdfPath);
+
   return output.path;
 }
 
@@ -120,7 +123,6 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
   await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
   await page.waitForTimeout(2000);
 
-  // FORCE NEPALI FONT RENDERING
   await page.addStyleTag({
     content: `
       * {
@@ -156,7 +158,6 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
 // ================= FILTER =================
 function shouldPost(title) {
   const t = title.toLowerCase();
-
   if (notAllowedProgram.some(q => t.includes(q))) return false;
 
   return (
@@ -173,11 +174,9 @@ function shouldPost(title) {
   });
 
   const page = await browser.newPage();
-  page.setViewport({ width: 1280, height: 2200 });
+  await page.setViewport({ width: 1280, height: 2200 });
 
-  const urls = [IOE_URL, TU_URL];
-
-  for (const url of urls) {
+  for (const url of [IOE_URL, TU_URL]) {
     console.log('🔍 Scraping:', url);
     const notices = await scrapeNotices(page, url);
 
@@ -187,27 +186,15 @@ function shouldPost(title) {
         .update(notice.title + notice.link)
         .digest('hex');
 
-      if (posted.includes(noticeId)) {
-        console.log('🔁 Skipped:', notice.title);
-        continue;
-      }
-
-      if (!shouldPost(notice.title)) {
-        console.log('🚫 Filtered:', notice.title);
-        continue;
-      }
+      if (posted.includes(noticeId)) continue;
+      if (!shouldPost(notice.title)) continue;
 
       console.log('🆕 Posting:', notice.title);
 
-      let img;
-      const deepPdf = await getDeepPdfLink(page, notice.link);
-
-      if (deepPdf) {
-        console.log('📄 PDF found:', deepPdf);
-        img = await pdfToImage(deepPdf, noticeId);
-      } else {
-        img = await screenshotNotice(page, notice.link, noticeId);
-      }
+      const pdf = await getDeepPdfLink(page, notice.link);
+      const img = pdf
+        ? await pdfToImage(pdf, noticeId)
+        : await screenshotNotice(page, notice.link, noticeId);
 
       await postToFB(`${notice.title}\n${notice.link}`, img);
       fs.unlinkSync(img);
