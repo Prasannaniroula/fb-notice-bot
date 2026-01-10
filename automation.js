@@ -6,6 +6,7 @@ const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
 const { fromPath } = require('pdf2pic');
+const { PDFDocument } = require('pdf-lib');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -46,18 +47,40 @@ if (fs.existsSync(POSTED_FILE)) {
 posted = posted.slice(-MAX_POSTED);
 
 // ================= FACEBOOK =================
-async function postToFB(message, imagePath) {
-  const form = new FormData();
-  form.append('source', fs.createReadStream(imagePath));
-  form.append('caption', message);
-  form.append('access_token', PAGE_ACCESS_TOKEN);
+async function postToFBMultiple(message, imagePaths) {
+  // 1. Upload all images first
+  const mediaIds = [];
 
-  const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
-    method: 'POST',
-    body: form
-  });
+  for (const img of imagePaths) {
+    const form = new FormData();
+    form.append('source', fs.createReadStream(img));
+    form.append('access_token', PAGE_ACCESS_TOKEN);
 
-  console.log('📸 FB:', await res.json());
+    const res = await fetch(`https://graph.facebook.com/${PAGE_ID}/photos`, {
+      method: 'POST',
+      body: form
+    });
+    const data = await res.json();
+    if (data.id) {
+      mediaIds.push({ media_fbid: data.id });
+    } else {
+      console.error('❌ Failed to upload image:', img, data);
+    }
+  }
+
+  // 2. Create one post with all images
+  if (mediaIds.length > 0) {
+    const postForm = new FormData();
+    postForm.append('message', message);
+    postForm.append('attached_media', JSON.stringify(mediaIds));
+    postForm.append('access_token', PAGE_ACCESS_TOKEN);
+
+    const postRes = await fetch(`https://graph.facebook.com/${PAGE_ID}/feed`, {
+      method: 'POST',
+      body: postForm
+    });
+    console.log('📸 FB Post:', await postRes.json());
+  }
 }
 
 // ================= SCRAPER =================
@@ -94,8 +117,8 @@ async function getDeepPdfLink(page, noticeUrl) {
   });
 }
 
-// ================= PDF → IMAGE (FIXED) =================
-async function pdfToImage(pdfUrl, noticeId) {
+// ================= PDF → IMAGE (ALL PAGES) =================
+async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl);
   const buffer = await res.arrayBuffer();
 
@@ -108,14 +131,21 @@ async function pdfToImage(pdfUrl, noticeId) {
     format: 'png',
     width: 1200,
     height: 1600,
-    graphicsMagick: false,   // 🔥 THIS FIXES THE ERROR
+    graphicsMagick: false,
     quality: 100
   });
 
-  const output = await converter(1); // first page only
-  fs.unlinkSync(pdfPath);
+  const pdfDoc = await PDFDocument.load(Buffer.from(buffer));
+  const totalPages = pdfDoc.getPageCount();
 
-  return output.path;
+  const imagePaths = [];
+  for (let i = 1; i <= totalPages; i++) {
+    const output = await converter(i);
+    imagePaths.push(output.path);
+  }
+
+  fs.unlinkSync(pdfPath);
+  return imagePaths;
 }
 
 // ================= SCREENSHOT NOTICE =================
@@ -192,12 +222,21 @@ function shouldPost(title) {
       console.log('🆕 Posting:', notice.title);
 
       const pdf = await getDeepPdfLink(page, notice.link);
-      const img = pdf
-        ? await pdfToImage(pdf, noticeId)
-        : await screenshotNotice(page, notice.link, noticeId);
+      let images = [];
 
-      await postToFB(`${notice.title}\n${notice.link}`, img);
-      fs.unlinkSync(img);
+      if (pdf) {
+        images = await pdfToImages(pdf, noticeId); // all PDF pages
+      } else {
+        images = [await screenshotNotice(page, notice.link, noticeId)];
+      }
+
+      // Post all images in ONE post
+      await postToFBMultiple(`${notice.title}\n${notice.link}`, images);
+
+      // Clean up images
+      for (const img of images) {
+        fs.unlinkSync(img);
+      }
 
       posted.push(noticeId);
       posted = posted.slice(-MAX_POSTED);
