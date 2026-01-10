@@ -47,10 +47,11 @@ if (fs.existsSync(POSTED_FILE)) {
 posted = posted.slice(-MAX_POSTED);
 
 // ================= FACEBOOK =================
-async function postToFBMultiple(message, imagePaths) {
-  // 1. Upload all images first
+// Upload multiple images and create ONE post with all of them
+async function postToFBSinglePost(message, imagePaths) {
   const mediaIds = [];
 
+  // 1️⃣ Upload each image without posting
   for (const img of imagePaths) {
     const form = new FormData();
     form.append('source', fs.createReadStream(img));
@@ -61,14 +62,11 @@ async function postToFBMultiple(message, imagePaths) {
       body: form
     });
     const data = await res.json();
-    if (data.id) {
-      mediaIds.push({ media_fbid: data.id });
-    } else {
-      console.error('❌ Failed to upload image:', img, data);
-    }
+    if (data.id) mediaIds.push({ media_fbid: data.id });
+    else console.error('❌ Failed to upload image:', img, data);
   }
 
-  // 2. Create one post with all images
+  // 2️⃣ Create one post with all images
   if (mediaIds.length > 0) {
     const postForm = new FormData();
     postForm.append('message', message);
@@ -140,8 +138,12 @@ async function pdfToImages(pdfUrl, noticeId) {
 
   const imagePaths = [];
   for (let i = 1; i <= totalPages; i++) {
-    const output = await converter(i);
-    imagePaths.push(output.path);
+    const timestamp = Date.now();
+    const imgPath = path.join('/tmp', `${noticeId}-page-${i}-${timestamp}.png`);
+    await converter(i); // generates image in /tmp
+    const generatedPath = path.join('/tmp', `${noticeId}-1.png`); // pdf2pic default
+    fs.renameSync(generatedPath, imgPath);
+    imagePaths.push(imgPath);
   }
 
   fs.unlinkSync(pdfPath);
@@ -161,7 +163,7 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
     `
   });
 
-  const imagePath = path.join('/tmp', `${noticeId}.png`);
+  const imagePath = path.join('/tmp', `${noticeId}-screenshot.png`);
 
   const selectors = [
     'div.single-post',
@@ -230,8 +232,8 @@ function shouldPost(title) {
         images = [await screenshotNotice(page, notice.link, noticeId)];
       }
 
-      // Post all images in ONE post
-      await postToFBMultiple(`${notice.title}\n${notice.link}`, images);
+      // Post all images in ONE Facebook post with message + link
+      await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
 
       // Clean up images
       for (const img of images) {
