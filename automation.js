@@ -18,7 +18,7 @@ const MAX_POSTED = 12;
 const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
 
-const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca'];
+const allowedPrograms = ['csit','bit','bba','engineering','bca'];
 
 const importantKeywords = [
   'सूचना','जरुरी','अत्यन्त','परिक्षा','नतिजा','फर्म','सूची',
@@ -47,11 +47,9 @@ if (fs.existsSync(POSTED_FILE)) {
 posted = posted.slice(-MAX_POSTED);
 
 // ================= FACEBOOK =================
-// Upload multiple images and create ONE post with all of them
 async function postToFBSinglePost(message, imagePaths) {
   const mediaIds = [];
 
-  // 1️⃣ Upload each image without posting
   for (const img of imagePaths) {
     const form = new FormData();
     form.append('source', fs.createReadStream(img));
@@ -66,7 +64,6 @@ async function postToFBSinglePost(message, imagePaths) {
     else console.error('❌ Failed to upload image:', img, data);
   }
 
-  // 2️⃣ Create one post with all images
   if (mediaIds.length > 0) {
     const postForm = new FormData();
     postForm.append('message', message);
@@ -123,26 +120,27 @@ async function pdfToImages(pdfUrl, noticeId) {
   const pdfPath = path.join('/tmp', `${noticeId}.pdf`);
   fs.writeFileSync(pdfPath, Buffer.from(buffer));
 
-  const converter = fromPath(pdfPath, {
-    density: 150,
-    savePath: '/tmp',
-    format: 'png',
-    width: 1200,
-    height: 1600,
-    graphicsMagick: false,
-    quality: 100
-  });
-
   const pdfDoc = await PDFDocument.load(Buffer.from(buffer));
   const totalPages = pdfDoc.getPageCount();
 
   const imagePaths = [];
+
   for (let i = 1; i <= totalPages; i++) {
     const timestamp = Date.now();
     const imgPath = path.join('/tmp', `${noticeId}-page-${i}-${timestamp}.png`);
-    await converter(i); // generates image in /tmp
-    const generatedPath = path.join('/tmp', `${noticeId}-1.png`); // pdf2pic default
-    fs.renameSync(generatedPath, imgPath);
+
+    const converter = fromPath(pdfPath, {
+      density: 150,
+      savePath: '/tmp',
+      saveFilename: `${noticeId}-page-${i}-${timestamp}`,
+      format: 'png',
+      width: 1200,
+      height: 1600,
+      graphicsMagick: false,
+      quality: 100
+    });
+
+    await converter(i); // generate page image
     imagePaths.push(imgPath);
   }
 
@@ -191,7 +189,6 @@ async function screenshotNotice(page, noticeUrl, noticeId) {
 function shouldPost(title) {
   const t = title.toLowerCase();
   if (notAllowedProgram.some(q => t.includes(q))) return false;
-
   return (
     importantKeywords.some(k => t.includes(k)) ||
     allowedPrograms.some(p => t.includes(p))
@@ -232,13 +229,11 @@ function shouldPost(title) {
         images = [await screenshotNotice(page, notice.link, noticeId)];
       }
 
-      // Post all images in ONE Facebook post with message + link
+      // Post all images in ONE Facebook post with title + link
       await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
 
       // Clean up images
-      for (const img of images) {
-        fs.unlinkSync(img);
-      }
+      for (const img of images) fs.unlinkSync(img);
 
       posted.push(noticeId);
       posted = posted.slice(-MAX_POSTED);
