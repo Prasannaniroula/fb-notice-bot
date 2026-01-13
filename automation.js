@@ -1,5 +1,4 @@
 // automation.js
-
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -7,7 +6,6 @@ const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
 const https = require('https');
-const sharp = require('sharp');
 const { fromPath } = require('pdf2pic');
 const { PDFDocument } = require('pdf-lib');
 
@@ -17,7 +15,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 // ================= CONFIG =================
 const POSTED_FILE = path.join(__dirname, 'notice', 'posted.json');
 const MAX_POSTED = 12;
-const POST_GAP_MS = 60_000;
+const POST_GAP_MS = 60_000; // 1 minute gap between FB posts
 
 const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
@@ -35,13 +33,13 @@ const notAllowedProgram = [
 ];
 // =========================================
 
-// 🔐 Insecure agent ONLY for broken TU TLS
+// 🔐 Scoped insecure agent ONLY for broken TU PDFs
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
-// Ensure notice dir
+// Ensure notice directory exists
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
 
-// Load posted IDs
+// Load posted notices
 let posted = [];
 if (fs.existsSync(POSTED_FILE)) {
   try {
@@ -53,61 +51,39 @@ if (fs.existsSync(POSTED_FILE)) {
 }
 posted = posted.slice(-MAX_POSTED);
 
-// ================= IMAGE HELPERS =================
-async function resizeImageIfNeeded(imgPath) {
-  const resized = imgPath.replace('.png', '-resized.png');
-
-  await sharp(imgPath)
-    .resize({ width: 1200 })
-    .png({ quality: 80 })
-    .toFile(resized);
-
-  return resized;
-}
-
 // ================= FACEBOOK =================
-async function uploadImageWithRetry(imgPath, maxRetries = 3) {
-  let attempt = 0;
-  let currentImage = imgPath;
-
-  while (attempt < maxRetries) {
+// Retry upload with exponential backoff
+async function uploadImageWithRetry(imgPath, retries = 3) {
+  let delay = 1000;
+  for (let i = 0; i < retries; i++) {
     try {
-      if (!fs.existsSync(currentImage)) return null;
-
+      if (!fs.existsSync(imgPath)) {
+        console.warn('⚠️ File not found:', imgPath);
+        return null;
+      }
       const form = new FormData();
-      form.append('source', fs.createReadStream(currentImage));
-      form.append('published', 'false'); // ⭐ REQUIRED
+      form.append('source', fs.createReadStream(imgPath));
+      form.append('published', 'false'); // Unpublished
       form.append('access_token', PAGE_ACCESS_TOKEN);
 
-      const res = await fetch(
-        `https://graph.facebook.com/v18.0/${PAGE_ID}/photos`,
-        { method: 'POST', body: form }
-      );
-
+      const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/photos`, {
+        method: 'POST',
+        body: form
+      });
       const data = await res.json();
-
       if (data?.id) {
-        console.log(`✅ Uploaded image (attempt ${attempt + 1})`);
+        console.log('✅ Uploaded image:', imgPath);
         return data.id;
+      } else {
+        console.warn('⚠️ Upload failed, retrying...', data);
       }
-
-      throw new Error('FB rejected image');
-
     } catch (err) {
-      attempt++;
-      console.warn(`⚠️ Upload failed (attempt ${attempt})`);
-
-      if (attempt === 1) {
-        console.warn('🔄 Trying resized image...');
-        currentImage = await resizeImageIfNeeded(imgPath);
-      }
-
-      const delay = Math.pow(2, attempt) * 1000;
-      await new Promise(r => setTimeout(r, delay));
+      console.warn('⚠️ Upload error, retrying...', err.message);
     }
+    await new Promise(r => setTimeout(r, delay));
+    delay *= 2; // exponential backoff
   }
-
-  console.error('❌ Image upload permanently failed:', imgPath);
+  console.warn('❌ Failed to upload image after retries:', imgPath);
   return null;
 }
 
@@ -120,35 +96,42 @@ async function postToFBSinglePost(message, imagePaths) {
     await new Promise(r => setTimeout(r, 1500));
   }
 
-  if (!mediaIds.length && imagePaths.length) {
-    console.warn('⚠️ No images uploaded, skipping FB post');
-    return;
-  }
-
   const body = new URLSearchParams();
   body.append('message', message);
   body.append('access_token', PAGE_ACCESS_TOKEN);
 
-  mediaIds.forEach((id, i) => {
-    body.append(
-      `attached_media[${i}]`,
-      JSON.stringify({ media_fbid: id })
-    );
-  });
-
-  const res = await fetch(
-    `https://graph.facebook.com/v18.0/${PAGE_ID}/feed`,
-    { method: 'POST', body }
-  );
-
-  const data = await res.json();
-
-  if (!data?.id) {
-    console.error('❌ FB post failed:', data);
-    return;
+  if (mediaIds.length) {
+    mediaIds.forEach((id, i) => {
+      body.append(`attached_media[${i}]`, JSON.stringify({ media_fbid: id }));
+    });
+  } else if (imagePaths.length) {
+    console.warn('⚠️ Images failed → posting text-only');
   }
 
-  console.log('🎉 FB post created:', data.id);
+  try {
+    const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/feed`, {
+      method: 'POST',
+      body
+    });
+    const data = await res.json();
+    if (!data?.id) {
+      console.error('❌ FB post failed:', data);
+    } else {
+      console.log(
+        mediaIds.length
+          ? '🎉 FB post created with images'
+          : '📝 FB post created (text-only)',
+        data.id
+      );
+    }
+  } catch (err) {
+    console.error('❌ FB post request error:', err.message);
+  }
+
+  // Cleanup files AFTER posting
+  imagePaths.forEach(f => {
+    if (fs.existsSync(f)) fs.unlinkSync(f);
+  });
 }
 
 // ================= SCRAPER =================
@@ -181,12 +164,12 @@ async function getDeepPdfLink(page, noticeUrl) {
   });
 }
 
-// ================= PDF → IMAGES =================
+// ================= PDF → IMAGES (REDIRECT-SAFE TLS FIX) =================
 async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl, {
     redirect: 'follow',
     follow: 5,
-    agent: p => p.protocol === 'https:' ? insecureAgent : null
+    agent: parsedURL => parsedURL.protocol === 'https:' ? insecureAgent : null
   });
 
   if (!res.ok) throw new Error(`Failed to download PDF: ${res.status}`);
@@ -198,17 +181,11 @@ async function pdfToImages(pdfUrl, noticeId) {
   const pdfDoc = await PDFDocument.load(Buffer.from(buffer));
   const totalPages = pdfDoc.getPageCount();
 
-  if (totalPages > 10) {
-    console.warn(`⚠️ PDF has ${totalPages} pages → skipping images`);
-    fs.unlinkSync(pdfPath);
-    return { skipImages: true, images: [] };
-  }
-
   const images = [];
+  const pagesToProcess = Math.min(totalPages, 10); // FB max 10 images
 
-  for (let i = 1; i <= totalPages; i++) {
+  for (let i = 1; i <= pagesToProcess; i++) {
     const name = `${noticeId}-page-${i}-${Date.now()}`;
-
     const converter = fromPath(pdfPath, {
       density: 96,
       savePath: '/tmp',
@@ -216,16 +193,21 @@ async function pdfToImages(pdfUrl, noticeId) {
       format: 'png',
       width: 960,
       height: 1280,
-      quality: 75
+      quality: 75,
+      graphicsMagick: false
     });
 
     await converter(i);
-    images.push(path.join('/tmp', `${name}.png`));
+    const imgPath = path.join('/tmp', `${name}.png`);
+
+    // Check if file exists before pushing
+    if (fs.existsSync(imgPath)) images.push(imgPath);
+
     await new Promise(r => setTimeout(r, 300));
   }
 
   fs.unlinkSync(pdfPath);
-  return { skipImages: false, images };
+  return images;
 }
 
 // ================= FILTER =================
@@ -244,7 +226,6 @@ function shouldPost(title) {
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
-
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 2200 });
 
@@ -253,35 +234,27 @@ function shouldPost(title) {
     const notices = await scrapeNotices(page, url);
 
     for (const notice of notices) {
-      const id = crypto
-        .createHash('sha256')
-        .update(notice.title + notice.link)
-        .digest('hex');
-
+      const id = crypto.createHash('sha256').update(notice.title + notice.link).digest('hex');
       if (posted.includes(id)) continue;
       if (!shouldPost(notice.title)) continue;
 
       console.log('🆕 Posting:', notice.title);
 
       const pdf = await getDeepPdfLink(page, notice.link);
-      if (!pdf) continue;
+      if (!pdf) {
+        console.warn('⚠️ No PDF found, posting link only');
+        await postToFBSinglePost(`${notice.title}\n${notice.link}`, []);
+        continue;
+      }
 
-      const { skipImages, images } = await pdfToImages(pdf, id);
-
-      await postToFBSinglePost(
-        `${notice.title}\n${notice.link}`,
-        skipImages ? [] : images
-      );
-
-      images.forEach(f => {
-        if (fs.existsSync(f)) fs.unlinkSync(f);
-      });
+      const images = await pdfToImages(pdf, id);
+      await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
 
       posted.push(id);
       posted = posted.slice(-MAX_POSTED);
       fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
 
-      console.log('⏳ Waiting 1 minute...');
+      console.log('⏳ Waiting 1 minute before next post...');
       await new Promise(r => setTimeout(r, POST_GAP_MS));
     }
   }
