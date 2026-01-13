@@ -65,7 +65,7 @@ function shouldPost(title) {
 }
 
 // ================= PDF → IMAGES =================
-async function pdfToImages(pdfUrl, noticeId) {
+async function pdfToImages(pdfUrl, noticeId, page) {
   const res = await fetch(pdfUrl, {
     redirect: 'follow',
     follow: 5,
@@ -81,32 +81,45 @@ async function pdfToImages(pdfUrl, noticeId) {
   console.log('📄 PDF total pages:', totalPages);
 
   const images = [];
-  const pagesToProcess = Math.min(totalPages, 10); // FB max 10 images
+  const pagesToProcess = Math.min(totalPages, 10);
 
   for (let i = 1; i <= pagesToProcess; i++) {
     const name = `${noticeId}-page-${i}-${Date.now()}`;
     const converter = fromPath(pdfPath, {
-      density: 150, // higher density for sharper images
+      density: 150,
       savePath: '/tmp',
       saveFilename: name,
       format: 'png',
-      width: 1200, // FB-friendly size
+      width: 1200,
       height: 1600,
       quality: 100,
       graphicsMagick: false
     });
 
-    const imgPath = path.join('/tmp', `${name}.png`);
     await converter(i);
 
-    // Auto-resize to standard FB size using sharp
+    const imgPath = path.join('/tmp', `${name}.png`);
+    if (!fs.existsSync(imgPath)) {
+      console.warn('⚠️ PNG not created, using Puppeteer screenshot fallback');
+      if (page) {
+        const screenshotPath = path.join('/tmp', `${name}-screenshot.png`);
+        await page.goto(pdfUrl, { waitUntil: 'networkidle2' });
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        images.push(screenshotPath);
+        continue;
+      } else {
+        console.warn('⚠️ No page object for screenshot fallback');
+        continue;
+      }
+    }
+
     const resizedPath = path.join('/tmp', `${name}.fixed.png`);
     await sharp(imgPath).resize(960, 1280, { fit: 'inside' }).toFile(resizedPath);
-    fs.unlinkSync(imgPath); // remove original
+    fs.unlinkSync(imgPath);
     images.push(resizedPath);
 
     console.log('✅ Image ready:', resizedPath);
-    await new Promise(r => setTimeout(r, 300)); // small delay
+    await new Promise(r => setTimeout(r, 300));
   }
 
   fs.unlinkSync(pdfPath);
