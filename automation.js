@@ -159,14 +159,29 @@ async function getDeepPdfLink(page, noticeUrl) {
   await page.goto(noticeUrl, { waitUntil: 'networkidle2', timeout: 0 });
   await page.waitForTimeout(2000);
 
-  return page.evaluate(() => {
-    const a = [...document.querySelectorAll('a')]
-      .find(a => a.href && a.href.toLowerCase().includes('.pdf'));
-    return a ? a.href : null;
+  const pdfLink = await page.evaluate(() => {
+    // Try anchors
+    const anchors = Array.from(document.querySelectorAll('a'));
+    for (const a of anchors) {
+      if (a.href?.toLowerCase().includes('.pdf')) return a.href;
+    }
+
+    // Try buttons or divs with onclick
+    const buttons = Array.from(document.querySelectorAll('button, div'));
+    for (const b of buttons) {
+      const onclick = b.getAttribute('onclick') || '';
+      const match = onclick.match(/window\.open\(['"](.+\.pdf)['"]/i);
+      if (match) return match[1];
+    }
+
+    return null;
   });
+
+  console.log('📄 PDF URL found:', pdfLink);
+  return pdfLink;
 }
 
-// ================= PDF → IMAGES (REDIRECT-SAFE TLS FIX) =================
+// ================= PDF → IMAGES =================
 async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl, {
     redirect: 'follow',
@@ -182,6 +197,7 @@ async function pdfToImages(pdfUrl, noticeId) {
 
   const pdfDoc = await PDFDocument.load(Buffer.from(buffer));
   const totalPages = pdfDoc.getPageCount();
+  console.log('📄 PDF total pages:', totalPages);
 
   const images = [];
   const pagesToProcess = Math.min(totalPages, 10); // FB max 10 images
@@ -229,7 +245,6 @@ function shouldPost(title) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 2200 });
 
-  // ===== SUMMARY COUNTERS =====
   let totalNotices = 0;
   let postedWithImages = 0;
   let postedTextOnly = 0;
@@ -240,6 +255,7 @@ function shouldPost(title) {
     const notices = await scrapeNotices(page, url);
 
     for (const notice of notices) {
+      console.log('📝 Notice found:', notice.title);
       const id = crypto.createHash('sha256').update(notice.title + notice.link).digest('hex');
       if (posted.includes(id)) continue;
       if (!shouldPost(notice.title)) continue;
