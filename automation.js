@@ -29,7 +29,7 @@ const importantKeywords = [
 
 const notAllowedProgram = [
   'degree','phd','msc','m.sc','scholarship','cas',
-  'स्नातकोत्तर','विद्यावारिधि','प्रमुख छनौट','बोलपत्र'
+  'स्नातकोत्तर','विद्यावारिधि','प्रमुख','छनौट','बोलपत्र'
 ];
 // =========================================
 
@@ -160,13 +160,11 @@ async function getDeepPdfLink(page, noticeUrl) {
   await page.waitForTimeout(2000);
 
   const pdfLink = await page.evaluate(() => {
-    // Try anchors
     const anchors = Array.from(document.querySelectorAll('a'));
     for (const a of anchors) {
       if (a.href?.toLowerCase().includes('.pdf')) return a.href;
     }
 
-    // Try buttons or divs with onclick
     const buttons = Array.from(document.querySelectorAll('button, div'));
     for (const b of buttons) {
       const onclick = b.getAttribute('onclick') || '';
@@ -200,7 +198,7 @@ async function pdfToImages(pdfUrl, noticeId) {
   console.log('📄 PDF total pages:', totalPages);
 
   const images = [];
-  const pagesToProcess = Math.min(totalPages, 10); // FB max 10 images
+  const pagesToProcess = Math.min(totalPages, 10);
 
   for (let i = 1; i <= pagesToProcess; i++) {
     const name = `${noticeId}-page-${i}-${Date.now()}`;
@@ -227,13 +225,22 @@ async function pdfToImages(pdfUrl, noticeId) {
 }
 
 // ================= FILTER =================
+function cleanText(str) {
+  return str.toLowerCase().replace(/[^a-z0-9\s\u0900-\u097F]/g, ' '); // keep Nepali chars
+}
+
 function shouldPost(title) {
-  const t = title.toLowerCase();
-  if (notAllowedProgram.some(x => t.includes(x))) return false;
-  return (
-    importantKeywords.some(x => t.includes(x)) ||
-    allowedPrograms.some(x => t.includes(x))
-  );
+  const t = cleanText(title);
+  const words = t.split(/\s+/);
+
+  // block if any notAllowedProgram word matches exactly
+  if (notAllowedProgram.some(x => words.includes(x.toLowerCase()))) return false;
+
+  // allow if any allowedProgram matches exactly or any important keyword substring matches
+  const allowed = allowedPrograms.some(x => words.includes(x.toLowerCase()));
+  const keyword = importantKeywords.some(k => t.includes(k.toLowerCase()));
+
+  return allowed || keyword;
 }
 
 // ================= MAIN =================
@@ -258,7 +265,10 @@ function shouldPost(title) {
       console.log('📝 Notice found:', notice.title);
       const id = crypto.createHash('sha256').update(notice.title + notice.link).digest('hex');
       if (posted.includes(id)) continue;
-      if (!shouldPost(notice.title)) continue;
+      if (!shouldPost(notice.title)) {
+        console.log('⚠️ Skipped by filter:', notice.title);
+        continue;
+      }
 
       console.log('🆕 Posting:', notice.title);
 
