@@ -262,5 +262,5 @@ async function getDeepPdfLink(page, noticeUrl) {
     'Posted with images:', postedWithImages,
     'Posted text-only:', postedTextOnly,
     'Failed posts:', failedPosts
-  );
+  ); 
 })();
