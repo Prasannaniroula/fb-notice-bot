@@ -8,6 +8,7 @@ const puppeteer = require('puppeteer');
 const https = require('https');
 const { fromPath } = require('pdf2pic');
 const { PDFDocument } = require('pdf-lib');
+const sharp = require('sharp');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -21,12 +22,10 @@ const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
 
 const allowedPrograms = ['csit', 'bit', 'bba', 'engineering', 'bca'];
-
 const importantKeywords = [
   'सूचना','जरुरी','अत्यन्त','परिक्षा','नतिजा','फर्म','सूची',
   'notice','result','exam','routine','model','course','published','request','entrance'
 ];
-
 const notAllowedProgram = [
   'degree','phd','msc','m.sc','scholarship','cas',
   'स्नातकोत्तर','विद्यावारिधि','प्रमुख','छनौट','बोलपत्र'
@@ -87,19 +86,27 @@ async function pdfToImages(pdfUrl, noticeId) {
   for (let i = 1; i <= pagesToProcess; i++) {
     const name = `${noticeId}-page-${i}-${Date.now()}`;
     const converter = fromPath(pdfPath, {
-      density: 96,
+      density: 150, // higher density for sharper images
       savePath: '/tmp',
       saveFilename: name,
       format: 'png',
-      width: 960,
-      height: 1280,
-      quality: 75,
+      width: 1200, // FB-friendly size
+      height: 1600,
+      quality: 100,
       graphicsMagick: false
     });
-    await converter(i);
+
     const imgPath = path.join('/tmp', `${name}.png`);
-    if (fs.existsSync(imgPath)) images.push(imgPath);
-    await new Promise(r => setTimeout(r, 300));
+    await converter(i);
+
+    // Auto-resize to standard FB size using sharp
+    const resizedPath = path.join('/tmp', `${name}.fixed.png`);
+    await sharp(imgPath).resize(960, 1280, { fit: 'inside' }).toFile(resizedPath);
+    fs.unlinkSync(imgPath); // remove original
+    images.push(resizedPath);
+
+    console.log('✅ Image ready:', resizedPath);
+    await new Promise(r => setTimeout(r, 300)); // small delay
   }
 
   fs.unlinkSync(pdfPath);
@@ -107,40 +114,48 @@ async function pdfToImages(pdfUrl, noticeId) {
 }
 
 // ================= FACEBOOK =================
-async function uploadImageWithTimeout(imgPath) {
-  return new Promise(async (resolve) => {
-    const start = Date.now();
-    let success = false;
-    let id = null;
-    while (!success && Date.now() - start < 10000) { // 10 seconds max
-      try {
-        if (!fs.existsSync(imgPath)) return resolve(null);
-        const form = new FormData();
-        form.append('source', fs.createReadStream(imgPath));
-        form.append('published', 'false');
-        form.append('access_token', PAGE_ACCESS_TOKEN);
-
-        const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/photos`, {
-          method: 'POST',
-          body: form
-        });
-        const data = await res.json();
-        if (data?.id) { id = data.id; success = true; break; }
-      } catch (err) {
-        console.warn('⚠️ Upload error, retrying...', err.message);
+async function uploadImageToFB(imgPath) {
+  // retry up to 3 times with 10s timeout
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (!fs.existsSync(imgPath) || fs.statSync(imgPath).size === 0) {
+        console.warn('⚠️ Image missing or zero size:', imgPath);
+        return null;
       }
-      await new Promise(r => setTimeout(r, 1000)); // retry every 1s
+
+      const form = new FormData();
+      form.append('source', fs.createReadStream(imgPath));
+      form.append('published', 'false');
+      form.append('access_token', PAGE_ACCESS_TOKEN);
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10s per upload
+
+      const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/photos`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      const data = await res.json();
+      if (data?.id) return data.id;
+      console.warn(`⚠️ FB upload failed (attempt ${attempt}):`, data);
+    } catch (err) {
+      console.warn(`⚠️ Upload attempt ${attempt} error:`, err.message);
     }
-    resolve(id);
-  });
+    await new Promise(r => setTimeout(r, 2000)); // wait before retry
+  }
+  return null;
 }
 
 async function postToFBSinglePost(message, imagePaths) {
   const mediaIds = [];
+
   for (const img of imagePaths) {
-    const id = await uploadImageWithTimeout(img);
+    const id = await uploadImageToFB(img);
     if (id) mediaIds.push({ media_fbid: id });
-    await new Promise(r => setTimeout(r, 1000)); // small delay between images
+    await new Promise(r => setTimeout(r, 1000));
   }
 
   const body = new URLSearchParams();
@@ -197,14 +212,6 @@ async function getDeepPdfLink(page, noticeUrl) {
   const pdfLink = await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll('a'));
     for (const a of anchors) if (a.href?.toLowerCase().includes('.pdf')) return a.href;
-
-    const buttons = Array.from(document.querySelectorAll('button, div'));
-    for (const b of buttons) {
-      const onclick = b.getAttribute('onclick') || '';
-      const match = onclick.match(/window\.open\(['"](.+\.pdf)['"]/i);
-      if (match) return match[1];
-    }
-
     return null;
   });
 
@@ -262,5 +269,5 @@ async function getDeepPdfLink(page, noticeUrl) {
     'Posted with images:', postedWithImages,
     'Posted text-only:', postedTextOnly,
     'Failed posts:', failedPosts
-  ); 
+  );
 })();
