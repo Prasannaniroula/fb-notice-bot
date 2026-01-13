@@ -52,7 +52,6 @@ if (fs.existsSync(POSTED_FILE)) {
 posted = posted.slice(-MAX_POSTED);
 
 // ================= FACEBOOK =================
-// Retry upload with exponential backoff
 async function uploadImageWithRetry(imgPath, retries = 3) {
   let delay = 1000;
   for (let i = 0; i < retries; i++) {
@@ -116,6 +115,7 @@ async function postToFBSinglePost(message, imagePaths) {
     const data = await res.json();
     if (!data?.id) {
       console.error('❌ FB post failed:', data);
+      return false;
     } else {
       console.log(
         mediaIds.length
@@ -123,15 +123,17 @@ async function postToFBSinglePost(message, imagePaths) {
           : '📝 FB post created (text-only)',
         data.id
       );
+      return mediaIds.length > 0 ? 'image' : 'text';
     }
   } catch (err) {
     console.error('❌ FB post request error:', err.message);
+    return false;
+  } finally {
+    // Cleanup files AFTER posting
+    imagePaths.forEach(f => {
+      if (fs.existsSync(f)) fs.unlinkSync(f);
+    });
   }
-
-  // Cleanup files AFTER posting
-  imagePaths.forEach(f => {
-    if (fs.existsSync(f)) fs.unlinkSync(f);
-  });
 }
 
 // ================= SCRAPER =================
@@ -200,9 +202,7 @@ async function pdfToImages(pdfUrl, noticeId) {
     await converter(i);
     const imgPath = path.join('/tmp', `${name}.png`);
 
-    // Check if file exists before pushing
     if (fs.existsSync(imgPath)) images.push(imgPath);
-
     await new Promise(r => setTimeout(r, 300));
   }
 
@@ -229,6 +229,12 @@ function shouldPost(title) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 2200 });
 
+  // ===== SUMMARY COUNTERS =====
+  let totalNotices = 0;
+  let postedWithImages = 0;
+  let postedTextOnly = 0;
+  let failedPosts = 0;
+
   for (const url of [IOE_URL, TU_URL]) {
     console.log('🔍 Scraping:', url);
     const notices = await scrapeNotices(page, url);
@@ -241,15 +247,18 @@ function shouldPost(title) {
       console.log('🆕 Posting:', notice.title);
 
       const pdf = await getDeepPdfLink(page, notice.link);
-      if (!pdf) {
-        console.warn('⚠️ No PDF found, posting link only');
-        await postToFBSinglePost(`${notice.title}\n${notice.link}`, []);
-        continue;
+      let images = [];
+      if (pdf) {
+        images = await pdfToImages(pdf, id);
       }
 
-      const images = await pdfToImages(pdf, id);
-      await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
+      const result = await postToFBSinglePost(`${notice.title}\n${notice.link}`, images);
 
+      if (result === 'image') postedWithImages++;
+      else if (result === 'text') postedTextOnly++;
+      else failedPosts++;
+
+      totalNotices++;
       posted.push(id);
       posted = posted.slice(-MAX_POSTED);
       fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
@@ -260,5 +269,11 @@ function shouldPost(title) {
   }
 
   await browser.close();
+
   console.log('✅ Done | Stored last 12 notices');
+  console.log('📊 SUMMARY:');
+  console.log('Total notices processed:', totalNotices);
+  console.log('Posted with images:', postedWithImages);
+  console.log('Posted text-only:', postedTextOnly);
+  console.log('Failed posts:', failedPosts);
 })();
