@@ -22,7 +22,6 @@ const TU_URL  = 'https://ioe.tu.edu.np/notices';
 
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
-// =========================================
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
 
 let posted = [];
@@ -41,7 +40,9 @@ function shouldPost(title) {
   return keywords.some(k => t.includes(k));
 }
 
-// ================= IMAGE NOTICE (SAFE) =================
+// ================= MEDIA DETECTION =================
+
+// --- Extract visible embedded image ---
 async function extractImageNotice(page, noticeId) {
   await page.waitForTimeout(1500);
 
@@ -51,14 +52,10 @@ async function extractImageNotice(page, noticeId) {
     try {
       const info = await img.evaluate(el => {
         const r = el.getBoundingClientRect();
-        return {
-          src: el.src || '',
-          w: r.width,
-          h: r.height
-        };
+        return { src: el.src || '', w: r.width, h: r.height };
       });
 
-      // Skip invisible / small images
+      // Skip invisible / tiny / irrelevant images
       if (info.w < 200 || info.h < 200) continue;
       if (!info.src.match(/\.(jpg|jpeg|png|webp)$/i)) continue;
 
@@ -76,7 +73,6 @@ async function extractImageNotice(page, noticeId) {
         .toFile(fixed);
 
       fs.unlinkSync(raw);
-
       console.log('🖼 Image notice detected');
       return [fixed];
 
@@ -85,21 +81,27 @@ async function extractImageNotice(page, noticeId) {
     }
   }
 
-  return null;
+  return null; // no image found
 }
 
-// ================= REAL PDF LINK =================
-async function getRealPdfLink(page) {
-  return await page.evaluate(() => {
+// --- Detect PDF download / iframe ---
+async function extractPdfNotice(page, noticeId) {
+  await page.waitForTimeout(1500);
+
+  // Check iframe
+  const iframeSrc = await page.evaluate(() => {
+    const ifr = document.querySelector('iframe');
+    if (ifr?.src?.toLowerCase().includes('.pdf')) return ifr.src;
+    return null;
+  });
+  if (iframeSrc) return await pdfToImages(iframeSrc, noticeId);
+
+  // Check download / view buttons
+  const downloadHref = await page.evaluate(() => {
     const els = Array.from(document.querySelectorAll('a,button'));
     for (const el of els) {
       const t = el.innerText?.toLowerCase() || '';
-      if (
-        t.includes('download') ||
-        t.includes('view') ||
-        t.includes('pdf') ||
-        el.href?.toLowerCase().endsWith('.pdf')
-      ) {
+      if (t.includes('download') || t.includes('view') || t.includes('pdf')) {
         if (el.href) return el.href;
         const oc = el.getAttribute('onclick');
         if (oc) {
@@ -110,75 +112,48 @@ async function getRealPdfLink(page) {
     }
     return null;
   });
+
+  if (downloadHref) return await pdfToImages(downloadHref, noticeId);
+  return null; // no PDF found
 }
 
 // ================= PDF → IMAGES =================
 async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl, {
     agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null,
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      'Referer': 'https://iost.tu.edu.np/'
-    }
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://iost.tu.edu.np/' }
   });
 
-  if (!res.ok) {
-    console.warn('⚠️ PDF fetch failed:', res.status);
-    return [];
-  }
-
+  if (!res.ok) return [];
   const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('pdf')) {
-    console.warn('⚠️ Not a real PDF (content-type):', contentType);
-    return [];
-  }
+  if (!contentType.includes('pdf')) return [];
 
   const buffer = Buffer.from(await res.arrayBuffer());
-
-  // HARD CHECK: real PDF header
-  if (!buffer.slice(0, 5).toString().startsWith('%PDF')) {
-    console.warn('⚠️ Fake PDF detected, skipping');
-    return [];
-  }
+  if (!buffer.slice(0, 5).toString().startsWith('%PDF')) return [];
 
   const pdfPath = `/tmp/${noticeId}.pdf`;
   fs.writeFileSync(pdfPath, buffer);
 
   let pdfDoc;
-  try {
-    pdfDoc = await PDFDocument.load(buffer);
-  } catch {
-    console.warn('⚠️ PDF parse failed, skipping');
-    fs.unlinkSync(pdfPath);
-    return [];
-  }
+  try { pdfDoc = await PDFDocument.load(buffer); } catch { fs.unlinkSync(pdfPath); return []; }
 
   const pages = Math.min(pdfDoc.getPageCount(), 10);
   console.log('📄 PDF pages:', pages);
 
   const images = [];
-
   for (let i = 1; i <= pages; i++) {
     const base = `${noticeId}-${i}`;
     const convert = fromPath(pdfPath, {
-      density: 150,
-      savePath: '/tmp',
-      saveFilename: base,
-      format: 'png',
-      width: 1200,
-      height: 1600
+      density: 150, savePath: '/tmp', saveFilename: base,
+      format: 'png', width: 1200, height: 1600
     });
-
     await convert(i);
 
     const img = `/tmp/${base}.png`;
     if (!fs.existsSync(img)) continue;
 
     const fixed = `/tmp/${base}.fixed.png`;
-    await sharp(img)
-      .resize(960, 1280, { fit: 'inside' })
-      .toFile(fixed);
-
+    await sharp(img).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
     fs.unlinkSync(img);
     images.push(fixed);
   }
@@ -194,18 +169,13 @@ async function uploadImage(img) {
   form.append('published', 'false');
   form.append('access_token', PAGE_ACCESS_TOKEN);
 
-  const res = await fetch(
-    `https://graph.facebook.com/v18.0/${PAGE_ID}/photos`,
-    { method: 'POST', body: form }
-  );
-
+  const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/photos`, { method: 'POST', body: form });
   const data = await res.json();
   return data?.id || null;
 }
 
 async function postToFB(message, images) {
   const media = [];
-
   for (const img of images) {
     const id = await uploadImage(img);
     if (id) media.push({ media_fbid: id });
@@ -214,16 +184,9 @@ async function postToFB(message, images) {
   const body = new URLSearchParams();
   body.append('message', message);
   body.append('access_token', PAGE_ACCESS_TOKEN);
+  media.forEach((m, i) => body.append(`attached_media[${i}]`, JSON.stringify(m)));
 
-  media.forEach((m, i) =>
-    body.append(`attached_media[${i}]`, JSON.stringify(m))
-  );
-
-  await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/feed`, {
-    method: 'POST',
-    body
-  });
-
+  await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/feed`, { method: 'POST', body });
   images.forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
 }
 
@@ -241,12 +204,7 @@ async function scrapeNotices(page, url) {
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu'
-    ]
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']
   });
 
   const page = await browser.newPage();
@@ -256,33 +214,29 @@ async function scrapeNotices(page, url) {
     const notices = await scrapeNotices(page, url);
 
     for (const n of notices) {
-      const id = crypto
-        .createHash('sha256')
-        .update(n.title + n.link)
-        .digest('hex');
-
-      if (posted.includes(id)) continue;
       if (!shouldPost(n.title)) continue;
 
-      console.log('🆕 Notice:', n.title);
+      const id = crypto.createHash('sha256').update(n.title + n.link).digest('hex');
+      if (posted.includes(id)) continue;
 
+      console.log('🆕 Notice:', n.title);
       await page.goto(n.link, { waitUntil: 'domcontentloaded', timeout: 0 });
       await page.waitForTimeout(1500);
 
-      // 1️⃣ Image notice
-      let images = await extractImageNotice(page, id);
-
-      // 2️⃣ PDF notice
+      // --- decide media type ---
+      let images = await extractPdfNotice(page, id);
+      let type = 'PDF';
       if (!images) {
-        const pdf = await getRealPdfLink(page);
-        if (pdf) images = await pdfToImages(pdf, id);
+        images = await extractImageNotice(page, id);
+        type = 'IMAGE';
       }
 
       if (!images || !images.length) {
-        console.warn('⚠️ No media found → text only');
-        images = [];
+        console.error('❌ Media not found for notice:', n.title);
+        continue; // skip, do NOT post text
       }
 
+      console.log(`✅ Posting ${type} notice`);
       await postToFB(`${n.title}\n${n.link}`, images);
 
       posted.push(id);
@@ -295,5 +249,5 @@ async function scrapeNotices(page, url) {
   }
 
   await browser.close();
-  console.log('✅ Done');
+  console.log('✅ All done');
 })();
