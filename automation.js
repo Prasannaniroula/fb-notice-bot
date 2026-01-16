@@ -115,18 +115,45 @@ async function getRealPdfLink(page) {
 // ================= PDF → IMAGES =================
 async function pdfToImages(pdfUrl, noticeId) {
   const res = await fetch(pdfUrl, {
-    agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null
+    agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null,
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Referer': 'https://iost.tu.edu.np/'
+    }
   });
 
-  if (!res.ok) return [];
+  if (!res.ok) {
+    console.warn('⚠️ PDF fetch failed:', res.status);
+    return [];
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('pdf')) {
+    console.warn('⚠️ Not a real PDF (content-type):', contentType);
+    return [];
+  }
 
   const buffer = Buffer.from(await res.arrayBuffer());
+
+  // HARD CHECK: real PDF header
+  if (!buffer.slice(0, 5).toString().startsWith('%PDF')) {
+    console.warn('⚠️ Fake PDF detected, skipping');
+    return [];
+  }
+
   const pdfPath = `/tmp/${noticeId}.pdf`;
   fs.writeFileSync(pdfPath, buffer);
 
-  const pdfDoc = await PDFDocument.load(buffer);
-  const pages = Math.min(pdfDoc.getPageCount(), 10);
+  let pdfDoc;
+  try {
+    pdfDoc = await PDFDocument.load(buffer);
+  } catch {
+    console.warn('⚠️ PDF parse failed, skipping');
+    fs.unlinkSync(pdfPath);
+    return [];
+  }
 
+  const pages = Math.min(pdfDoc.getPageCount(), 10);
   console.log('📄 PDF pages:', pages);
 
   const images = [];
@@ -143,8 +170,8 @@ async function pdfToImages(pdfUrl, noticeId) {
     });
 
     await convert(i);
-    const img = `/tmp/${base}.png`;
 
+    const img = `/tmp/${base}.png`;
     if (!fs.existsSync(img)) continue;
 
     const fixed = `/tmp/${base}.fixed.png`;
