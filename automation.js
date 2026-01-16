@@ -22,8 +22,8 @@ const TU_URL = 'https://ioe.tu.edu.np/notices';
 
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
-// Ensure posted.json exists
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
+
 let posted = [];
 if (fs.existsSync(POSTED_FILE)) {
   try { posted = JSON.parse(fs.readFileSync(POSTED_FILE)); } catch {}
@@ -101,26 +101,21 @@ async function extractNoticeMedia(page, noticeId) {
     return [fixed];
   }
 
-  // 2️⃣ Check for download/view PDF button
-  const buttons = await page.$$('a, button');
-  for (const btn of buttons) {
-    const text = await btn.evaluate(el => el.innerText.toLowerCase());
-    if (!text.includes('pdf') && !text.includes('download') && !text.includes('view')) continue;
+  // 2️⃣ Check for PDF links without clicking
+  const pdfLink = await page.evaluate(() => {
+    const el = Array.from(document.querySelectorAll('a, button, div'))
+      .find(e => e.innerText.toLowerCase().includes('pdf') || e.innerText.toLowerCase().includes('download'));
+    return el?.href || el?.dataset?.href || null;
+  });
 
-    console.log('📄 PDF button detected, clicking...');
+  if (pdfLink) {
+    console.log('📄 PDF detected via href:', pdfLink);
     try {
-      const [response] = await Promise.all([
-        page.waitForResponse(resp => resp.headers()['content-type']?.includes('pdf')),
-        btn.click({ delay: 100 })
-      ]);
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-      console.log('✅ PDF downloaded via Puppeteer click');
+      const res = await fetch(pdfLink, { agent: insecureAgent });
+      const buffer = Buffer.from(await res.arrayBuffer());
       return await pdfBufferToImages(buffer, noticeId);
-
     } catch (err) {
-      console.warn('❌ PDF click/download failed:', err.message);
-      continue;
+      console.error('⚠️ Failed to fetch PDF directly:', err.message);
     }
   }
 
@@ -175,16 +170,9 @@ async function scrapeNotices(page, url) {
 // -------------------- MAIN --------------------
 (async () => {
   const browser = await puppeteer.launch({
-    headless: "new",
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu'
-    ]
+    headless: 'new',
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
-
   const page = await browser.newPage();
 
   for (const url of [IOE_URL, TU_URL]) {
