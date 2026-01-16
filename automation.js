@@ -1,215 +1,166 @@
-// ==================== automation.js ====================
+// automation.js
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const puppeteer = require('puppeteer');
-const sharp = require('sharp');
-const { PDFDocument } = require('pdf-lib');
-const { fromBuffer } = require('pdf2pic');
+const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
-const fetch = require('node-fetch');
-const https = require('https');
+const puppeteer = require('puppeteer');
+const { PDFDocument } = require('pdf-lib');
+const { fromPath } = require('pdf2pic');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
-const POSTED_FILE = path.join(__dirname, 'notice', 'posted.json');
-const MAX_POSTED = 12;
-const POST_GAP_MS = 60_000;
+// Temporary file to store posted notice IDs
+const postedFile = path.join(__dirname, 'notice', 'posted.json');
+let postedNotices = {};
+if (fs.existsSync(postedFile)) postedNotices = JSON.parse(fs.readFileSync(postedFile));
 
-const IOE_URL = 'https://iost.tu.edu.np/notices';
-const TU_URL = 'https://ioe.tu.edu.np/notices';
-
-const insecureAgent = new https.Agent({ rejectUnauthorized: false });
-
-fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
-
-let posted = [];
-if (fs.existsSync(POSTED_FILE)) {
-  try { posted = JSON.parse(fs.readFileSync(POSTED_FILE)); } catch {}
-}
-posted = posted.slice(-MAX_POSTED);
-
-// ==================== UTILS ====================
-function shouldPost(title) {
-  const t = title.toLowerCase();
-  const keywords = [
-    'notice','exam','result','routine','entrance',
-    'सूचना','नतिजा','फाराम','परीक्षा'
-  ];
-  return keywords.some(k => t.includes(k));
+// Helper: Save posted notice IDs
+function savePosted() {
+  fs.writeFileSync(postedFile, JSON.stringify(postedNotices, null, 2));
 }
 
-// -------------------- PDF → IMAGES --------------------
-async function pdfBufferToImages(buffer, noticeId) {
-  const pdfDoc = await PDFDocument.load(buffer);
-  const pages = Math.min(pdfDoc.getPageCount(), 10);
-  const images = [];
+// Convert PDF to images (1 per page)
+async function pdfToImages(pdfBuffer, noticeId) {
+  const tmpDir = path.join('/tmp', noticeId);
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const tempPdfPath = path.join(tmpDir, 'temp.pdf');
+  fs.writeFileSync(tempPdfPath, pdfBuffer);
 
-  for (let i = 1; i <= pages; i++) {
-    const base = `${noticeId}-${i}`;
-    const converter = fromBuffer(buffer, {
-      density: 150,
-      format: 'png',
-      width: 1200,
-      height: 1600
-    });
-    const outPath = `/tmp/${base}.png`;
-    await converter(i, { savePath: '/tmp', saveFilename: base });
-    const fixed = `/tmp/${base}.fixed.png`;
-    await sharp(outPath).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
-    fs.unlinkSync(outPath);
-    images.push(fixed);
-  }
-  return images;
-}
-
-// -------------------- EXTRACT NOTICE MEDIA --------------------
-async function extractNoticeMedia(page, noticeId) {
-  await page.waitForTimeout(1500);
-
-  // 1️⃣ Check for embedded images first
-  const imgHandles = await page.$$('img');
-  let maxArea = 0, chosenImg = null;
-
-  for (const img of imgHandles) {
-    try {
-      const info = await img.evaluate(el => {
-        const rect = el.getBoundingClientRect();
-        return { w: rect.width, h: rect.height, src: el.src || '' };
-      });
-      const area = info.w * info.h;
-      if (area > maxArea && info.w > 200 && info.h > 200 && info.src.match(/\.(jpg|jpeg|png|webp)/i)) {
-        maxArea = area;
-        chosenImg = img;
-      }
-    } catch { continue; }
-  }
-
-  if (chosenImg) {
-    await chosenImg.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-    await page.waitForTimeout(500);
-
-    const raw = `/tmp/${noticeId}-img.png`;
-    await chosenImg.screenshot({ path: raw });
-
-    const fixed = `/tmp/${noticeId}-img.fixed.png`;
-    await sharp(raw).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
-    fs.unlinkSync(raw);
-
-    console.log('🖼 Embedded image detected');
-    return [fixed];
-  }
-
-  // 2️⃣ Check for PDF links without clicking
-  const pdfLink = await page.evaluate(() => {
-    const el = Array.from(document.querySelectorAll('a, button, div'))
-      .find(e => e.innerText.toLowerCase().includes('pdf') || e.innerText.toLowerCase().includes('download'));
-    return el?.href || el?.dataset?.href || null;
+  const convert = fromPath(tempPdfPath, {
+    density: 150,
+    saveFilename: noticeId,
+    savePath: tmpDir,
+    format: 'png',
+    width: 1200
   });
 
-  if (pdfLink) {
-    console.log('📄 PDF detected via href:', pdfLink);
+  const pages = await convert(1); // first page only
+  return pages.map(p => p.path ? [p.path] : []);
+}
+
+// Post images to Facebook
+async function postToFacebook(message, images) {
+  if (!images || images.length === 0) return;
+  for (const imgPath of images) {
+    const form = new FormData();
+    form.append('source', fs.createReadStream(imgPath));
+    form.append('caption', message);
+    form.append('access_token', PAGE_ACCESS_TOKEN);
+
+    await fetch(`https://graph.facebook.com/v17.0/${PAGE_ID}/photos`, {
+      method: 'POST',
+      body: form
+    });
+  }
+}
+
+// Fetch PDF via node-fetch
+async function fetchPDF(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Failed to fetch PDF');
+  return Buffer.from(await res.arrayBuffer());
+}
+
+// Scrape IOST notices
+async function scrapeIOST(page) {
+  await page.goto('https://iost.tu.edu.np/notices', { waitUntil: 'networkidle2', timeout: 60000 });
+  const notices = await page.$$eval('.views-row', rows => {
+    return rows.map(row => {
+      const title = row.querySelector('.views-field-title a')?.textContent.trim();
+      const link = row.querySelector('.views-field-title a')?.getAttribute('href');
+      const onclick = row.querySelector('a.button.download')?.getAttribute('onclick');
+      const img = row.querySelector('img')?.getAttribute('src');
+      return { title, link, onclick, img };
+    });
+  });
+
+  for (const notice of notices) {
+    const id = notice.link || notice.title;
+    if (postedNotices[id]) continue;
+
+    let images = [];
+
     try {
-      const res = await fetch(pdfLink, { agent: insecureAgent });
-      const buffer = Buffer.from(await res.arrayBuffer());
-      return await pdfBufferToImages(buffer, noticeId);
+      if (notice.onclick) {
+        // Extract PDF URL from onclick, e.g., openPDF('downloads/123.pdf')
+        const match = notice.onclick.match(/['"](.+\.pdf)['"]/);
+        if (match) {
+          const pdfUrl = `https://iost.tu.edu.np/${match[1]}`;
+          const pdfBuffer = await fetchPDF(pdfUrl);
+          images = (await pdfToImages(pdfBuffer, id)).flat();
+        }
+      } else if (notice.img) {
+        images = [`https://iost.tu.edu.np${notice.img}`];
+      }
+
+      if (images.length > 0) {
+        await postToFacebook(notice.title, images);
+        postedNotices[id] = true;
+        savePosted();
+        console.log(`✅ Posted: ${notice.title}`);
+      } else {
+        console.log(`❌ No media found for notice: ${id}`);
+      }
+
     } catch (err) {
-      console.error('⚠️ Failed to fetch PDF directly:', err.message);
+      console.log(`❌ Failed to process notice: ${notice.title}`, err.message);
     }
   }
-
-  console.error('❌ No media found for notice:', noticeId);
-  return null;
 }
 
-// -------------------- FACEBOOK --------------------
-async function uploadImage(img) {
-  const form = new FormData();
-  form.append('source', fs.createReadStream(img));
-  form.append('published', 'false');
-  form.append('access_token', PAGE_ACCESS_TOKEN);
-
-  const res = await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/photos`, { method: 'POST', body: form });
-  const data = await res.json();
-  return data?.id || null;
-}
-
-async function postToFB(message, images) {
-  const media = [];
-  for (const img of images) {
-    const id = await uploadImage(img);
-    if (id) media.push({ media_fbid: id });
-  }
-
-  const body = new URLSearchParams();
-  body.append('message', message);
-  body.append('access_token', PAGE_ACCESS_TOKEN);
-  media.forEach((m, i) => body.append(`attached_media[${i}]`, JSON.stringify(m)));
-
-  await fetch(`https://graph.facebook.com/v18.0/${PAGE_ID}/feed`, { method: 'POST', body });
-  images.forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
-}
-
-// -------------------- SCRAPER --------------------
-async function scrapeNotices(page, url) {
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
-  await page.waitForTimeout(1500);
-
-  return page.evaluate(() => {
-    const nodes = Array.from(document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper, a'));
-    return nodes
-      .map(n => {
-        const a = n.querySelector('a') || n;
-        return { title: a.innerText?.trim(), link: a.href };
-      })
-      .filter(n => n.title && n.link);
+// Scrape IOE notices
+async function scrapeIOE(page) {
+  await page.goto('https://ioe.tu.edu.np/notices', { waitUntil: 'networkidle2', timeout: 60000 });
+  const notices = await page.$$eval('.views-row', rows => {
+    return rows.map(row => {
+      const title = row.querySelector('.views-field-title a')?.textContent.trim();
+      const link = row.querySelector('.views-field-title a')?.href;
+      const img = row.querySelector('img')?.src;
+      return { title, link, img };
+    });
   });
+
+  for (const notice of notices) {
+    const id = notice.link || notice.title;
+    if (postedNotices[id]) continue;
+
+    let images = [];
+
+    try {
+      if (notice.link && notice.link.endsWith('.pdf')) {
+        const pdfBuffer = await fetchPDF(notice.link);
+        images = (await pdfToImages(pdfBuffer, id)).flat();
+      } else if (notice.img) {
+        images = [notice.img];
+      }
+
+      if (images.length > 0) {
+        await postToFacebook(notice.title, images);
+        postedNotices[id] = true;
+        savePosted();
+        console.log(`✅ Posted: ${notice.title}`);
+      } else {
+        console.log(`❌ No media found for notice: ${id}`);
+      }
+    } catch (err) {
+      console.log(`❌ Failed to process notice: ${notice.title}`, err.message);
+    }
+  }
 }
 
-// -------------------- MAIN --------------------
 (async () => {
   const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
   const page = await browser.newPage();
 
-  for (const url of [IOE_URL, TU_URL]) {
-    console.log('🔍 Scraping:', url);
-    const notices = await scrapeNotices(page, url);
+  console.log('🔍 Scraping: https://iost.tu.edu.np/notices');
+  await scrapeIOST(page);
 
-    for (const n of notices) {
-      if (!shouldPost(n.title)) continue;
-
-      const id = crypto.createHash('sha256').update(n.title + n.link).digest('hex');
-      if (posted.includes(id)) continue;
-
-      console.log('🆕 Notice:', n.title);
-
-      try {
-        await page.goto(n.link, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(1500);
-
-        const media = await extractNoticeMedia(page, id);
-        if (!media || media.length === 0) continue;
-
-        console.log(`✅ Posting notice with ${media.length} image(s)`);
-        await postToFB(`${n.title}\n${n.link}`, media);
-
-        posted.push(id);
-        posted = posted.slice(-MAX_POSTED);
-        fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
-
-        console.log('⏳ Waiting 1 minute before next post...');
-        await new Promise(r => setTimeout(r, POST_GAP_MS));
-
-      } catch (err) {
-        console.error('❌ Failed to process notice:', n.title, err.message);
-        continue;
-      }
-    }
-  }
+  console.log('🔍 Scraping: https://ioe.tu.edu.np/notices');
+  await scrapeIOE(page);
 
   await browser.close();
   console.log('✅ All done');
