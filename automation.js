@@ -2,12 +2,12 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const fetch = require('node-fetch'); // v2
-const FormData = require('form-data');
 const puppeteer = require('puppeteer');
 const sharp = require('sharp');
 const { PDFDocument } = require('pdf-lib');
-const { fromPath } = require('pdf2pic');
+const { fromBuffer } = require('pdf2pic');
+const FormData = require('form-data');
+const fetch = require('node-fetch');
 const https = require('https');
 
 const PAGE_ID = process.env.PAGE_ID;
@@ -19,6 +19,7 @@ const POST_GAP_MS = 60_000;
 
 const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
+
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
@@ -39,98 +40,35 @@ function shouldPost(title) {
   return keywords.some(k => t.includes(k));
 }
 
-// -------------------- FETCH PDF BUFFER WITH RETRY --------------------
-async function fetchPdfBuffer(pdfUrl, retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch(pdfUrl, { agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const buffer = Buffer.from(await res.arrayBuffer());
-      if (!buffer.slice(0, 5).toString().startsWith('%PDF')) throw new Error('Not a PDF');
-      return buffer;
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      console.warn(`Retrying PDF fetch (${i+1}) for ${pdfUrl}...`);
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  }
-}
-
 // -------------------- PDF → IMAGES --------------------
-async function pdfToImages(pdfUrl, noticeId) {
-  let buffer;
-  try { buffer = await fetchPdfBuffer(pdfUrl); } catch(err) {
-    console.error('❌ Failed to fetch PDF:', pdfUrl, err.message);
-    return [];
-  }
-
-  const pdfPath = `/tmp/${noticeId}.pdf`;
-  fs.writeFileSync(pdfPath, buffer);
-
-  let pdfDoc;
-  try { pdfDoc = await PDFDocument.load(buffer); } catch { fs.unlinkSync(pdfPath); return []; }
-
+async function pdfBufferToImages(buffer, noticeId) {
+  const pdfDoc = await PDFDocument.load(buffer);
   const pages = Math.min(pdfDoc.getPageCount(), 10);
   const images = [];
 
   for (let i = 1; i <= pages; i++) {
     const base = `${noticeId}-${i}`;
-    const convert = fromPath(pdfPath, {
-      density: 150, savePath: '/tmp', saveFilename: base,
-      format: 'png', width: 1200, height: 1600
+    const converter = fromBuffer(buffer, {
+      density: 150,
+      format: 'png',
+      width: 1200,
+      height: 1600
     });
-    await convert(i);
-
-    const img = `/tmp/${base}.png`;
-    if (!fs.existsSync(img)) continue;
-
+    const outPath = `/tmp/${base}.png`;
+    await converter(i, { savePath: '/tmp', saveFilename: base });
     const fixed = `/tmp/${base}.fixed.png`;
-    await sharp(img).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
-    fs.unlinkSync(img);
+    await sharp(outPath).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
+    fs.unlinkSync(outPath);
     images.push(fixed);
   }
-
-  fs.unlinkSync(pdfPath);
   return images;
 }
 
-// -------------------- EXTRACT MEDIA --------------------
+// -------------------- EXTRACT NOTICE MEDIA --------------------
 async function extractNoticeMedia(page, noticeId) {
   await page.waitForTimeout(1500);
 
-  // 1️⃣ Check for PDF in iframe
-  const iframePdf = await page.evaluate(() => {
-    const ifr = document.querySelector('iframe');
-    if (ifr?.src?.toLowerCase().includes('.pdf')) return ifr.src;
-    return null;
-  });
-  if (iframePdf) {
-    console.log('📄 PDF found in iframe');
-    return await pdfToImages(iframePdf, noticeId);
-  }
-
-  // 2️⃣ Check for PDF download / view button
-  const downloadPdf = await page.evaluate(() => {
-    const els = Array.from(document.querySelectorAll('a,button'));
-    for (const el of els) {
-      const t = el.innerText?.toLowerCase() || '';
-      if (t.includes('download') || t.includes('view') || t.includes('pdf')) {
-        if (el.href) return el.href;
-        const oc = el.getAttribute('onclick');
-        if (oc) {
-          const m = oc.match(/'(https?:\/\/[^']+)'/);
-          if (m) return m[1];
-        }
-      }
-    }
-    return null;
-  });
-  if (downloadPdf) {
-    console.log('📄 PDF found via download/view button');
-    return await pdfToImages(downloadPdf, noticeId);
-  }
-
-  // 3️⃣ Check for embedded images (largest visible block)
+  // 1️⃣ Check for embedded images first
   const imgHandles = await page.$$('img');
   let maxArea = 0, chosenImg = null;
 
@@ -163,8 +101,32 @@ async function extractNoticeMedia(page, noticeId) {
     return [fixed];
   }
 
-  console.error('❌ Media not found for notice:', noticeId);
-  return null; // must have either PDF or image
+  // 2️⃣ Check for download/view PDF button and intercept
+  const buttons = await page.$$('a, button');
+  for (const btn of buttons) {
+    const text = await btn.evaluate(el => el.innerText.toLowerCase());
+    if (!text.includes('pdf') && !text.includes('download') && !text.includes('view')) continue;
+
+    console.log('📄 PDF button detected, clicking...');
+    try {
+      // Intercept the PDF response
+      const [response] = await Promise.all([
+        page.waitForResponse(resp => resp.headers()['content-type']?.includes('pdf')),
+        btn.click({ delay: 100 })
+      ]);
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      console.log('✅ PDF downloaded via Puppeteer click');
+      return await pdfBufferToImages(buffer, noticeId);
+
+    } catch (err) {
+      console.warn('❌ PDF click/download failed:', err.message);
+      continue;
+    }
+  }
+
+  console.error('❌ No media found for notice:', noticeId);
+  return null;
 }
 
 // -------------------- FACEBOOK --------------------
@@ -215,7 +177,7 @@ async function scrapeNotices(page, url) {
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
   const page = await browser.newPage();
 
@@ -236,7 +198,7 @@ async function scrapeNotices(page, url) {
         await page.waitForTimeout(1500);
 
         const media = await extractNoticeMedia(page, id);
-        if (!media || media.length === 0) continue; // skip if no media
+        if (!media || media.length === 0) continue;
 
         console.log(`✅ Posting notice with ${media.length} image(s)`);
         await postToFB(`${n.title}\n${n.link}`, media);
