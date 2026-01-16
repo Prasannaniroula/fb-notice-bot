@@ -1,25 +1,24 @@
+// ==================== automation.js ====================
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
-const https = require('https');
 const sharp = require('sharp');
 const { PDFDocument } = require('pdf-lib');
 const { fromPath } = require('pdf2pic');
+const https = require('https');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
-// ================= CONFIG =================
 const POSTED_FILE = path.join(__dirname, 'notice', 'posted.json');
 const MAX_POSTED = 12;
 const POST_GAP_MS = 60_000;
 
 const IOE_URL = 'https://iost.tu.edu.np/notices';
 const TU_URL = 'https://ioe.tu.edu.np/notices';
-
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 fs.mkdirSync(path.dirname(POSTED_FILE), { recursive: true });
@@ -30,7 +29,7 @@ if (fs.existsSync(POSTED_FILE)) {
 }
 posted = posted.slice(-MAX_POSTED);
 
-// ================= UTILS =================
+// ==================== UTILS ====================
 function shouldPost(title) {
   const t = title.toLowerCase();
   const keywords = [
@@ -40,19 +39,30 @@ function shouldPost(title) {
   return keywords.some(k => t.includes(k));
 }
 
-// ================= PDF → IMAGES =================
+// -------------------- FETCH PDF BUFFER WITH RETRY --------------------
+async function fetchPdfBuffer(pdfUrl, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(pdfUrl, { agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (!buffer.slice(0, 5).toString().startsWith('%PDF')) throw new Error('Not a PDF');
+      return buffer;
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      console.warn(`Retrying PDF fetch (${i+1}) for ${pdfUrl}...`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+}
+
+// -------------------- PDF → IMAGES --------------------
 async function pdfToImages(pdfUrl, noticeId) {
-  const res = await fetch(pdfUrl, {
-    agent: parsed => parsed.protocol === 'https:' ? insecureAgent : null,
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://iost.tu.edu.np/' }
-  });
-
-  if (!res.ok) return [];
-  const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('pdf')) return [];
-
-  const buffer = Buffer.from(await res.arrayBuffer());
-  if (!buffer.slice(0, 5).toString().startsWith('%PDF')) return [];
+  let buffer;
+  try { buffer = await fetchPdfBuffer(pdfUrl); } catch(err) {
+    console.error('❌ Failed to fetch PDF:', pdfUrl, err.message);
+    return [];
+  }
 
   const pdfPath = `/tmp/${noticeId}.pdf`;
   fs.writeFileSync(pdfPath, buffer);
@@ -84,7 +94,7 @@ async function pdfToImages(pdfUrl, noticeId) {
   return images;
 }
 
-// ================= EXTRACT NOTICE MEDIA =================
+// -------------------- EXTRACT MEDIA --------------------
 async function extractNoticeMedia(page, noticeId) {
   await page.waitForTimeout(1500);
 
@@ -130,7 +140,6 @@ async function extractNoticeMedia(page, noticeId) {
         const rect = el.getBoundingClientRect();
         return { w: rect.width, h: rect.height, src: el.src || '' };
       });
-
       const area = info.w * info.h;
       if (area > maxArea && info.w > 200 && info.h > 200 && info.src.match(/\.(jpg|jpeg|png|webp)/i)) {
         maxArea = area;
@@ -155,10 +164,10 @@ async function extractNoticeMedia(page, noticeId) {
   }
 
   console.error('❌ Media not found for notice:', noticeId);
-  return null; // must have PDF or image
+  return null; // must have either PDF or image
 }
 
-// ================= FACEBOOK =================
+// -------------------- FACEBOOK --------------------
 async function uploadImage(img) {
   const form = new FormData();
   form.append('source', fs.createReadStream(img));
@@ -186,12 +195,11 @@ async function postToFB(message, images) {
   images.forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
 }
 
-// ================= SCRAPER =================
+// -------------------- SCRAPER --------------------
 async function scrapeNotices(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
   await page.waitForTimeout(1500);
 
-  // Get links to individual notices (TU/IOE/IOST may use divs or anchors)
   return page.evaluate(() => {
     const nodes = Array.from(document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper, a'));
     return nodes
@@ -203,7 +211,7 @@ async function scrapeNotices(page, url) {
   });
 }
 
-// ================= MAIN =================
+// -------------------- MAIN --------------------
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -222,21 +230,28 @@ async function scrapeNotices(page, url) {
       if (posted.includes(id)) continue;
 
       console.log('🆕 Notice:', n.title);
-      await page.goto(n.link, { waitUntil: 'domcontentloaded', timeout: 0 });
-      await page.waitForTimeout(1500);
 
-      const media = await extractNoticeMedia(page, id);
-      if (!media || media.length === 0) continue; // skip if no media
+      try {
+        await page.goto(n.link, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(1500);
 
-      console.log(`✅ Posting notice with ${media.length} image(s)`);
-      await postToFB(`${n.title}\n${n.link}`, media);
+        const media = await extractNoticeMedia(page, id);
+        if (!media || media.length === 0) continue; // skip if no media
 
-      posted.push(id);
-      posted = posted.slice(-MAX_POSTED);
-      fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
+        console.log(`✅ Posting notice with ${media.length} image(s)`);
+        await postToFB(`${n.title}\n${n.link}`, media);
 
-      console.log('⏳ Waiting 1 minute before next post...');
-      await new Promise(r => setTimeout(r, POST_GAP_MS));
+        posted.push(id);
+        posted = posted.slice(-MAX_POSTED);
+        fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
+
+        console.log('⏳ Waiting 1 minute before next post...');
+        await new Promise(r => setTimeout(r, POST_GAP_MS));
+
+      } catch (err) {
+        console.error('❌ Failed to process notice:', n.title, err.message);
+        continue;
+      }
     }
   }
 
