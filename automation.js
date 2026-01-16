@@ -1,167 +1,132 @@
 // automation.js
-const fs = require('fs');
-const path = require('path');
-const fetch = require('node-fetch'); // v2
-const FormData = require('form-data');
-const puppeteer = require('puppeteer');
-const { PDFDocument } = require('pdf-lib');
-const { fromPath } = require('pdf2pic');
+const fs = require("fs");
+const path = require("path");
+const fetch = require("node-fetch");
+const { PDFDocument } = require("pdf-lib");
+const { fromPath } = require("pdf2pic");
+const puppeteer = require("puppeteer");
+
+const IOST_URL = "https://iost.tu.edu.np/notices";
+const IOE_URL = "https://ioe.tu.edu.np/notices";
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 
-// Temporary file to store posted notice IDs
-const postedFile = path.join(__dirname, 'notice', 'posted.json');
-let postedNotices = {};
-if (fs.existsSync(postedFile)) postedNotices = JSON.parse(fs.readFileSync(postedFile));
+const POSTED_FILE = path.join(__dirname, "notice", "posted.json");
 
-// Helper: Save posted notice IDs
+// Load posted notices
+let posted = {};
+if (fs.existsSync(POSTED_FILE)) {
+  posted = JSON.parse(fs.readFileSync(POSTED_FILE));
+}
+
+// Save posted notices
 function savePosted() {
-  fs.writeFileSync(postedFile, JSON.stringify(postedNotices, null, 2));
+  fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
 }
 
-// Convert PDF to images (1 per page)
-async function pdfToImages(pdfBuffer, noticeId) {
-  const tmpDir = path.join('/tmp', noticeId);
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const tempPdfPath = path.join(tmpDir, 'temp.pdf');
-  fs.writeFileSync(tempPdfPath, pdfBuffer);
-
-  const convert = fromPath(tempPdfPath, {
-    density: 150,
-    saveFilename: noticeId,
-    savePath: tmpDir,
-    format: 'png',
-    width: 1200
-  });
-
-  const pages = await convert(1); // first page only
-  return pages.map(p => p.path ? [p.path] : []);
-}
-
-// Post images to Facebook
-async function postToFacebook(message, images) {
-  if (!images || images.length === 0) return;
-  for (const imgPath of images) {
-    const form = new FormData();
-    form.append('source', fs.createReadStream(imgPath));
-    form.append('caption', message);
-    form.append('access_token', PAGE_ACCESS_TOKEN);
-
-    await fetch(`https://graph.facebook.com/v17.0/${PAGE_ID}/photos`, {
-      method: 'POST',
-      body: form
-    });
-  }
-}
-
-// Fetch PDF via node-fetch
-async function fetchPDF(url) {
+// Helper: download PDF directly
+async function downloadPDF(url, outputPath) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error('Failed to fetch PDF');
-  return Buffer.from(await res.arrayBuffer());
+  if (!res.ok) throw new Error("Failed to fetch PDF: " + url);
+  const buffer = await res.arrayBuffer();
+  fs.writeFileSync(outputPath, Buffer.from(buffer));
+  return outputPath;
 }
 
-// Scrape IOST notices
-async function scrapeIOST(page) {
-  await page.goto('https://iost.tu.edu.np/notices', { waitUntil: 'networkidle2', timeout: 60000 });
-  const notices = await page.$$eval('.views-row', rows => {
-    return rows.map(row => {
-      const title = row.querySelector('.views-field-title a')?.textContent.trim();
-      const link = row.querySelector('.views-field-title a')?.getAttribute('href');
-      const onclick = row.querySelector('a.button.download')?.getAttribute('onclick');
-      const img = row.querySelector('img')?.getAttribute('src');
-      return { title, link, onclick, img };
+// Helper: convert PDF to image
+async function pdfToImage(pdfPath, outputDir) {
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+  const options = { density: 150, saveFilename: path.basename(pdfPath, ".pdf"), savePath: outputDir, format: "png", width: 1200 };
+  const storeAsImage = fromPath(pdfPath, options);
+  const pages = await storeAsImage(1); // Only first page for posting
+  return [pages.path]; // return array of image paths
+}
+
+// Helper: post to Facebook
+async function postToFB(message, media = []) {
+  const formData = new FormData();
+  formData.append("message", message);
+
+  if (media.length > 0) {
+    media.forEach((file, idx) => {
+      formData.append(`source`, fs.createReadStream(file));
     });
-  });
-
-  for (const notice of notices) {
-    const id = notice.link || notice.title;
-    if (postedNotices[id]) continue;
-
-    let images = [];
-
-    try {
-      if (notice.onclick) {
-        // Extract PDF URL from onclick, e.g., openPDF('downloads/123.pdf')
-        const match = notice.onclick.match(/['"](.+\.pdf)['"]/);
-        if (match) {
-          const pdfUrl = `https://iost.tu.edu.np/${match[1]}`;
-          const pdfBuffer = await fetchPDF(pdfUrl);
-          images = (await pdfToImages(pdfBuffer, id)).flat();
-        }
-      } else if (notice.img) {
-        images = [`https://iost.tu.edu.np${notice.img}`];
-      }
-
-      if (images.length > 0) {
-        await postToFacebook(notice.title, images);
-        postedNotices[id] = true;
-        savePosted();
-        console.log(`✅ Posted: ${notice.title}`);
-      } else {
-        console.log(`❌ No media found for notice: ${id}`);
-      }
-
-    } catch (err) {
-      console.log(`❌ Failed to process notice: ${notice.title}`, err.message);
-    }
+    formData.append("published", "true");
   }
+
+  const url = `https://graph.facebook.com/v17.0/${PAGE_ID}/photos?access_token=${PAGE_ACCESS_TOKEN}`;
+  const res = await fetch(url, { method: "POST", body: formData });
+  const json = await res.json();
+  if (json.error) throw new Error(JSON.stringify(json.error));
+  return json;
 }
 
-// Scrape IOE notices
-async function scrapeIOE(page) {
-  await page.goto('https://ioe.tu.edu.np/notices', { waitUntil: 'networkidle2', timeout: 60000 });
-  const notices = await page.$$eval('.views-row', rows => {
-    return rows.map(row => {
-      const title = row.querySelector('.views-field-title a')?.textContent.trim();
-      const link = row.querySelector('.views-field-title a')?.href;
-      const img = row.querySelector('img')?.src;
-      return { title, link, img };
-    });
-  });
-
-  for (const notice of notices) {
-    const id = notice.link || notice.title;
-    if (postedNotices[id]) continue;
-
-    let images = [];
-
-    try {
-      if (notice.link && notice.link.endsWith('.pdf')) {
-        const pdfBuffer = await fetchPDF(notice.link);
-        images = (await pdfToImages(pdfBuffer, id)).flat();
-      } else if (notice.img) {
-        images = [notice.img];
-      }
-
-      if (images.length > 0) {
-        await postToFacebook(notice.title, images);
-        postedNotices[id] = true;
-        savePosted();
-        console.log(`✅ Posted: ${notice.title}`);
-      } else {
-        console.log(`❌ No media found for notice: ${id}`);
-      }
-    } catch (err) {
-      console.log(`❌ Failed to process notice: ${notice.title}`, err.message);
-    }
-  }
-}
-
-(async () => {
+// Scrape notices from a page
+async function scrapeNotices(url) {
   const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
   const page = await browser.newPage();
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
 
-  console.log('🔍 Scraping: https://iost.tu.edu.np/notices');
-  await scrapeIOST(page);
-
-  console.log('🔍 Scraping: https://ioe.tu.edu.np/notices');
-  await scrapeIOE(page);
+  // Get notice links and titles
+  const notices = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll(".views-row, .notice-item"));
+    return rows.map(r => {
+      const titleEl = r.querySelector("h3, .notice-title, a");
+      const linkEl = r.querySelector("a");
+      return {
+        title: titleEl ? titleEl.innerText.trim() : "Untitled Notice",
+        link: linkEl ? linkEl.href : null
+      };
+    });
+  });
 
   await browser.close();
-  console.log('✅ All done');
+  return notices;
+}
+
+// Main
+(async () => {
+  try {
+    const allNotices = [
+      ...(await scrapeNotices(IOST_URL)),
+      ...(await scrapeNotices(IOE_URL))
+    ];
+
+    for (let notice of allNotices) {
+      if (posted[notice.link]) continue;
+
+      console.log("🆕 Notice:", notice.title);
+
+      let mediaFiles = [];
+
+      try {
+        // Try direct PDF fetch if notice link ends with .pdf
+        if (notice.link && notice.link.endsWith(".pdf")) {
+          const pdfPath = path.join("/tmp", path.basename(notice.link));
+          await downloadPDF(notice.link, pdfPath);
+          mediaFiles = await pdfToImage(pdfPath, "/tmp");
+        }
+      } catch (err) {
+        console.warn("⚠️ PDF fetch/convert failed:", err.message);
+      }
+
+      try {
+        // Post to Facebook
+        await postToFB(`${notice.title}\n${notice.link || ""}`, mediaFiles);
+        console.log("✅ Posted to Facebook:", notice.title);
+        posted[notice.link] = true;
+        savePosted();
+      } catch (err) {
+        console.error("❌ Failed to post:", err.message);
+      }
+    }
+
+    console.log("✅ All done");
+  } catch (err) {
+    console.error("❌ Automation failed:", err.message);
+  }
 })();
