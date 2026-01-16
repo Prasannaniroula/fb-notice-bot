@@ -1,13 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // v2
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
 const https = require('https');
-const { fromPath } = require('pdf2pic');
-const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
+const { PDFDocument } = require('pdf-lib');
+const { fromPath } = require('pdf2pic');
 
 const PAGE_ID = process.env.PAGE_ID;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -18,7 +18,7 @@ const MAX_POSTED = 12;
 const POST_GAP_MS = 60_000;
 
 const IOE_URL = 'https://iost.tu.edu.np/notices';
-const TU_URL  = 'https://ioe.tu.edu.np/notices';
+const TU_URL = 'https://ioe.tu.edu.np/notices';
 
 const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
@@ -38,83 +38,6 @@ function shouldPost(title) {
     'सूचना','नतिजा','फाराम','परीक्षा'
   ];
   return keywords.some(k => t.includes(k));
-}
-
-// ================= MEDIA DETECTION =================
-
-// --- Extract visible embedded image ---
-async function extractImageNotice(page, noticeId) {
-  await page.waitForTimeout(1500);
-
-  const imgs = await page.$$('img');
-
-  for (const img of imgs) {
-    try {
-      const info = await img.evaluate(el => {
-        const r = el.getBoundingClientRect();
-        return { src: el.src || '', w: r.width, h: r.height };
-      });
-
-      // Skip invisible / tiny / irrelevant images
-      if (info.w < 200 || info.h < 200) continue;
-      if (!info.src.match(/\.(jpg|jpeg|png|webp)$/i)) continue;
-
-      await img.evaluate(el =>
-        el.scrollIntoView({ block: 'center', behavior: 'instant' })
-      );
-      await page.waitForTimeout(500);
-
-      const raw = `/tmp/${noticeId}-img.png`;
-      await img.screenshot({ path: raw });
-
-      const fixed = `/tmp/${noticeId}-img.fixed.png`;
-      await sharp(raw)
-        .resize(960, 1280, { fit: 'inside' })
-        .toFile(fixed);
-
-      fs.unlinkSync(raw);
-      console.log('🖼 Image notice detected');
-      return [fixed];
-
-    } catch {
-      continue;
-    }
-  }
-
-  return null; // no image found
-}
-
-// --- Detect PDF download / iframe ---
-async function extractPdfNotice(page, noticeId) {
-  await page.waitForTimeout(1500);
-
-  // Check iframe
-  const iframeSrc = await page.evaluate(() => {
-    const ifr = document.querySelector('iframe');
-    if (ifr?.src?.toLowerCase().includes('.pdf')) return ifr.src;
-    return null;
-  });
-  if (iframeSrc) return await pdfToImages(iframeSrc, noticeId);
-
-  // Check download / view buttons
-  const downloadHref = await page.evaluate(() => {
-    const els = Array.from(document.querySelectorAll('a,button'));
-    for (const el of els) {
-      const t = el.innerText?.toLowerCase() || '';
-      if (t.includes('download') || t.includes('view') || t.includes('pdf')) {
-        if (el.href) return el.href;
-        const oc = el.getAttribute('onclick');
-        if (oc) {
-          const m = oc.match(/'(https?:\/\/[^']+)'/);
-          if (m) return m[1];
-        }
-      }
-    }
-    return null;
-  });
-
-  if (downloadHref) return await pdfToImages(downloadHref, noticeId);
-  return null; // no PDF found
 }
 
 // ================= PDF → IMAGES =================
@@ -138,9 +61,8 @@ async function pdfToImages(pdfUrl, noticeId) {
   try { pdfDoc = await PDFDocument.load(buffer); } catch { fs.unlinkSync(pdfPath); return []; }
 
   const pages = Math.min(pdfDoc.getPageCount(), 10);
-  console.log('📄 PDF pages:', pages);
-
   const images = [];
+
   for (let i = 1; i <= pages; i++) {
     const base = `${noticeId}-${i}`;
     const convert = fromPath(pdfPath, {
@@ -160,6 +82,80 @@ async function pdfToImages(pdfUrl, noticeId) {
 
   fs.unlinkSync(pdfPath);
   return images;
+}
+
+// ================= EXTRACT NOTICE MEDIA =================
+async function extractNoticeMedia(page, noticeId) {
+  await page.waitForTimeout(1500);
+
+  // 1️⃣ Check for PDF in iframe
+  const iframePdf = await page.evaluate(() => {
+    const ifr = document.querySelector('iframe');
+    if (ifr?.src?.toLowerCase().includes('.pdf')) return ifr.src;
+    return null;
+  });
+  if (iframePdf) {
+    console.log('📄 PDF found in iframe');
+    return await pdfToImages(iframePdf, noticeId);
+  }
+
+  // 2️⃣ Check for PDF download / view button
+  const downloadPdf = await page.evaluate(() => {
+    const els = Array.from(document.querySelectorAll('a,button'));
+    for (const el of els) {
+      const t = el.innerText?.toLowerCase() || '';
+      if (t.includes('download') || t.includes('view') || t.includes('pdf')) {
+        if (el.href) return el.href;
+        const oc = el.getAttribute('onclick');
+        if (oc) {
+          const m = oc.match(/'(https?:\/\/[^']+)'/);
+          if (m) return m[1];
+        }
+      }
+    }
+    return null;
+  });
+  if (downloadPdf) {
+    console.log('📄 PDF found via download/view button');
+    return await pdfToImages(downloadPdf, noticeId);
+  }
+
+  // 3️⃣ Check for embedded images (largest visible block)
+  const imgHandles = await page.$$('img');
+  let maxArea = 0, chosenImg = null;
+
+  for (const img of imgHandles) {
+    try {
+      const info = await img.evaluate(el => {
+        const rect = el.getBoundingClientRect();
+        return { w: rect.width, h: rect.height, src: el.src || '' };
+      });
+
+      const area = info.w * info.h;
+      if (area > maxArea && info.w > 200 && info.h > 200 && info.src.match(/\.(jpg|jpeg|png|webp)/i)) {
+        maxArea = area;
+        chosenImg = img;
+      }
+    } catch { continue; }
+  }
+
+  if (chosenImg) {
+    await chosenImg.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+    await page.waitForTimeout(500);
+
+    const raw = `/tmp/${noticeId}-img.png`;
+    await chosenImg.screenshot({ path: raw });
+
+    const fixed = `/tmp/${noticeId}-img.fixed.png`;
+    await sharp(raw).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
+    fs.unlinkSync(raw);
+
+    console.log('🖼 Embedded image detected');
+    return [fixed];
+  }
+
+  console.error('❌ Media not found for notice:', noticeId);
+  return null; // must have PDF or image
 }
 
 // ================= FACEBOOK =================
@@ -190,23 +186,29 @@ async function postToFB(message, images) {
   images.forEach(f => fs.existsSync(f) && fs.unlinkSync(f));
 }
 
-// ================= SCRAPE =================
+// ================= SCRAPER =================
 async function scrapeNotices(page, url) {
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 0 });
-  return page.evaluate(() =>
-    Array.from(document.querySelectorAll('a'))
-      .map(a => ({ title: a.innerText?.trim(), link: a.href }))
-      .filter(n => n.title && n.link)
-  );
+  await page.waitForTimeout(1500);
+
+  // Get links to individual notices (TU/IOE/IOST may use divs or anchors)
+  return page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('div.recent-post-wrapper, li.recent-post-wrapper, a'));
+    return nodes
+      .map(n => {
+        const a = n.querySelector('a') || n;
+        return { title: a.innerText?.trim(), link: a.href };
+      })
+      .filter(n => n.title && n.link);
+  });
 }
 
 // ================= MAIN =================
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
-
   const page = await browser.newPage();
 
   for (const url of [IOE_URL, TU_URL]) {
@@ -223,27 +225,17 @@ async function scrapeNotices(page, url) {
       await page.goto(n.link, { waitUntil: 'domcontentloaded', timeout: 0 });
       await page.waitForTimeout(1500);
 
-      // --- decide media type ---
-      let images = await extractPdfNotice(page, id);
-      let type = 'PDF';
-      if (!images) {
-        images = await extractImageNotice(page, id);
-        type = 'IMAGE';
-      }
+      const media = await extractNoticeMedia(page, id);
+      if (!media || media.length === 0) continue; // skip if no media
 
-      if (!images || !images.length) {
-        console.error('❌ Media not found for notice:', n.title);
-        continue; // skip, do NOT post text
-      }
-
-      console.log(`✅ Posting ${type} notice`);
-      await postToFB(`${n.title}\n${n.link}`, images);
+      console.log(`✅ Posting notice with ${media.length} image(s)`);
+      await postToFB(`${n.title}\n${n.link}`, media);
 
       posted.push(id);
       posted = posted.slice(-MAX_POSTED);
       fs.writeFileSync(POSTED_FILE, JSON.stringify(posted, null, 2));
 
-      console.log('⏳ Waiting 1 minute...');
+      console.log('⏳ Waiting 1 minute before next post...');
       await new Promise(r => setTimeout(r, POST_GAP_MS));
     }
   }
