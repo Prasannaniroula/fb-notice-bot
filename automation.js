@@ -66,10 +66,9 @@ async function pdfBufferToImages(buffer, noticeId) {
 async function extractNoticeMedia(page, noticeId) {
   await page.waitForTimeout(1500);
 
-  // 1️⃣ Check for embedded images first
+  // 1️⃣ Embedded images first
   const imgHandles = await page.$$('img');
   let maxArea = 0, chosenImg = null;
-
   for (const img of imgHandles) {
     try {
       const info = await img.evaluate(el => {
@@ -83,57 +82,38 @@ async function extractNoticeMedia(page, noticeId) {
       }
     } catch { continue; }
   }
-
   if (chosenImg) {
-    await chosenImg.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
-    await page.waitForTimeout(500);
-
     const raw = `/tmp/${noticeId}-img.png`;
     await chosenImg.screenshot({ path: raw });
-
     const fixed = `/tmp/${noticeId}-img.fixed.png`;
     await sharp(raw).resize(960, 1280, { fit: 'inside' }).toFile(fixed);
     fs.unlinkSync(raw);
-
     console.log('🖼 Embedded image detected');
     return [fixed];
   }
 
-  // 2️⃣ Check for PDF buttons/links
-  const buttons = await page.$$('a, button');
-  for (const btn of buttons) {
-    const text = await btn.evaluate(el => el.innerText.toLowerCase());
-    if (!text.includes('pdf') && !text.includes('download') && !text.includes('view')) continue;
+  // 2️⃣ PDF links with .pdf extension
+  const pdfLinks = await page.$$eval('a', links =>
+    links.map(a => a.href).filter(href => href.toLowerCase().endsWith('.pdf'))
+  );
 
-    let pdfUrl = await btn.evaluate(el => el.href || el.dataset.href || '');
-    if (!pdfUrl) {
-      try {
-        const [resp] = await Promise.all([
-          page.waitForResponse(r => r.headers()['content-type']?.includes('pdf')),
-          btn.click({ delay: 100 })
-        ]);
-        pdfUrl = resp.url();
-      } catch { /* ignore */ }
-    }
-
-    if (pdfUrl) {
-      console.log('📄 PDF detected:', pdfUrl);
-      try {
-        // ✅ Use HTTPS agent to ignore certificate errors
-        const agent = new https.Agent({ rejectUnauthorized: false });
-        const res = await fetch(pdfUrl, { agent });
-        const buffer = await res.buffer();
-        return await pdfBufferToImages(buffer, noticeId);
-      } catch (err) {
-        console.warn(`⚠️ Failed to fetch PDF ${pdfUrl}:`, err.message);
-        continue;
-      }
+  for (const pdfUrl of pdfLinks) {
+    console.log('📄 PDF detected:', pdfUrl);
+    try {
+      const agent = new https.Agent({ rejectUnauthorized: false });
+      const res = await fetch(pdfUrl, { agent });
+      const buffer = await res.buffer();
+      return await pdfBufferToImages(buffer, noticeId);
+    } catch (err) {
+      console.warn(`⚠️ Failed to fetch PDF ${pdfUrl}:`, err.message);
+      continue;
     }
   }
 
   console.error('❌ No media found for notice:', noticeId);
   return null;
 }
+
 
 // -------------------- FACEBOOK --------------------
 async function uploadImage(img) {
